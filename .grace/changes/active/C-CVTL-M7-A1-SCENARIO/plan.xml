@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="draft">
+<GraceChangePlan graceVersion="4.0" status="approved">
   <C-CVTL-M7-A1-SCENARIO>
     <IntentSummary>Добавить настраиваемый профиль A1 v2 на базе 4bb7bd0. Общая сборка Body и Bridge, одна запись смены параметров и один тракт реплея. Реализация начинается с тестов после отдельного утверждения плана.</IntentSummary>
     <BaselineAssertions>
