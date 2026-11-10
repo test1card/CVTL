@@ -3,3 +3,6 @@ name = "cvtl-instruments"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+cvtl-core = { path = "../cvtl-core" }

@@ -47,6 +47,9 @@ dependencies = [
 [[package]]
 name = "cvtl-instruments"
 version = "0.1.0"
+dependencies = [
+ "cvtl-core",
+]
 
 [[package]]
 name = "cvtl-materials"
@@ -70,6 +73,10 @@ version = "0.1.0"
 [[package]]
 name = "cvtl-sim"
 version = "0.1.0"
+dependencies = [
+ "cvtl-core",
+ "cvtl-instruments",
+]
 
 [[package]]
 name = "cvtl-store"
