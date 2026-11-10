@@ -1,0 +1,86 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M7-A1-REPLAY>
+    <IntentSummary>Расширить одну команду replay на профиль A1 на базе f811a09ee05110bd87771e2949ada56c72d8be5d. Пересчитать тело и решения, сохранить наблюдения и причинные свидетельства отдельно. Тесты предшествуют коду, реализация начинается после отдельного утверждения плана.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist>
+        <Value>M-CVTL-CLI</Value>
+        <Value>M-CVTL-MATERIALS</Value>
+        <Value>.grace/changes/archive/C-CVTL-M7-A1-LOOP/spec.xml</Value>
+        <Value>crates/cvtl-cli/tests/m6_replay.rs</Value>
+      </MustExist>
+      <MustOwn><Owner>GD-MAIN</Owner><Anchor>M-CVTL-CLI</Anchor></MustOwn>
+      <MustContain><File>crates/cvtl-cli/src/replay/profile.rs</File><Text>test_only_m6_recording_v1</Text></MustContain>
+      <MustNotExist><Value>crates/cvtl-cli/src/replay/a1.rs</Value><Value>crates/cvtl-cli/tests/m7_a1_replay.rs</Value></MustNotExist>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist><Value>crates/cvtl-cli/src/replay/a1.rs</Value><Value>crates/cvtl-cli/tests/m7_a1_replay.rs</Value></MustExist>
+      <MustVerify><Module>M-CVTL-CLI</Module><Module>M-CVTL-MATERIALS</Module></MustVerify>
+      <MustContain><File>crates/cvtl-cli/src/replay/profile.rs</File><Text>test_only_a1_loop_v1</Text></MustContain>
+      <MustContain><File>crates/cvtl-cli/src/replay/profile.rs</File><Text>test_only_m6_recording_v1</Text></MustContain>
+      <MustContain><File>crates/cvtl-materials/src/lib.rs</File><Text>nist_heat_capacity_from_catalog</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="2">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="25">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-CLI /><M-CVTL-MATERIALS /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-CLI /><V-M-CVTL-MATERIALS /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>crates/cvtl-cli/src/replay.rs</File>
+      <File>crates/cvtl-cli/src/replay/profile.rs</File>
+      <File>crates/cvtl-cli/src/replay/a1.rs</File>
+      <File>crates/cvtl-cli/tests/m7_a1_replay.rs</File>
+      <File>crates/cvtl-materials/src/lib.rs</File>
+      <File>crates/cvtl-materials/tests/curves.rs</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/STATUS.md</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Проверенный снимок и архивная теплоёмкость</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала тесты. Загрузчик различает точные пары meta и YAML для v1 и test_only_a1_loop_v1, проверяет существующую версию, схему, идентификатор, поколение, SHA-256 и запрет аппаратного режима. Для A1 проверяет synthetic, материал, массу, начальную температуру, scale, постоянный мост, порт tf, additional_load и нулевой приток тела. Параметры головы остаются условиями опыта. Профиль контроллера переиспользуется из существующего снимка.</Criterion>
+          <Criterion>Единый разбор NIST-аппроксимации получает текст каталога. nist_heat_capacity_from_catalog принимает сохранённый текст и проверяет кривую существующими правилами. Загрузчик A1 читает nist_csv из проверенного обычного файла не более существующего лимита заголовка 64 KiB, проверяет хэш и разбирает тот же буфер. Пустой, неверный или дублированный ряд запрошенного свойства отклоняется. Встроенный вызов сохраняет значения cp, k и происхождение. Тест сравнивает числа на том же каталоге и подтверждает, что изменённый допустимый каталог действительно меняет cp.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-materials --test curves</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Пересчёт теплового состояния в существующем офлайн-реплее</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала интеграционные тесты. Использовать прежнее восстановление кадров, группировку по seq, сверку журнала и Controller/Supervisor. Добавить один локальный модуль A1 с Body, мостом, состоянием удержания tf и последней границей шага. На первом подтверждённом Start взять tf и read_started_ns из принятых входов, для повторных Start сохранить тепловую историю. Без шага допустимы операторские запросы и Observe до первого Start. Устаревание и модельный отказ с model_valid=false воспроизводятся из признака и наблюдений M5, без подстановки потерянного шага.</Criterion>
+          <Criterion>На рабочем такте проверить удержанное tf по истории, возраст от записанного KRDG и предел max_temperature_age из снимка с допустимым равенством. Конец шага следует из read_started_ns + held_tf_age_ns, соседние интервалы непрерывны. Первый шаг имеет положительный интервал и начинается после принятых входов Start. Использовать только interval_ns для Body, сначала шаг со старым мостом, затем смена scale и моста. Точные поля сверки: held_tf_k, body_temperature_k, temperature_before_k, temperature_after_k, dH_event_j и requested_w побитово. После шага при доступном tf передавать пересчитанный знаковый запрос в существующий M4, при отсутствующем tf сохранить удержанное наблюдение и Observe. heater_energy_j и температуры головки остаются наблюдениями. Нет вычисления скрытого отвода или хвоста после последней границы.</Criterion>
+          <Criterion>После подтверждённого ON для A1 построить свежий Controller из уже проверенных параметров. Для точного отказа источника допускается Unknown только при причинном свидетельстве неудачного чтения I/V в текущем сеансе и двух OFF intent без посторонних команд. Использовать proof_unavailable M5. При повторном Stop до подтверждённого восстановления учитывать тот же отказ источника. Recovery требует штатных доказательств идентификации, OFF и нулевых уставок. Сохранённая сводка проверяется после вычисления состояния. Отклонённый Start до Arm воспроизводится через Supervisor, с совпадением записей наблюдения и операторской команды и без intent, отправки или ложного ON. После восстановления нагрев возможен только через штатные Reset, Arm и Start. Если доказательств не хватает, вернуть insufficient вместо достраивания.</Criterion>
+          <Criterion>Сохранить прежние коды и форму отчёта v1. Для A1 добавить компактную итоговую сводку числа пересчитанных тепловых шагов и последней границы. Раздельно сохранять число проверенных raw, воспроизводимые такты, проверенное состояние выхода и неизвестную историческую завершённость. Для несовместимости или недостаточности выдавать диагностический результат существующим способом. Работа CLI использует только обычные локальные файлы, cvtl-sim остаётся dev-зависимостью.</Criterion>
+          <Criterion>Интеграционные проверки используют короткий файловый LOOP. Проверить повторяемость отчёта и хэшей, изменения scale и G, подмену dH или запроса в целостном кадре, отсутствие или неверный хэш каталога, несовместимый профиль и оборванный хвост. Проверить реальный source drop, Unknown, Stop, подтверждённый OFF после восстановления, Reset, отклонённый Start, ручные Arm и Start и конечный OFF. Если удалить причинное свидетельство потери источника, статус остаётся insufficient. Legacy тесты и архивный 600-тактовый v1 сохраняют прежний отчёт.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo test --locked -p cvtl-cli --test m7_a1_replay</Command>
+          <Command>cargo test --locked -p cvtl-cli --test m6_replay</Command>
+          <Command>cargo tree --locked -p cvtl-cli --edges normal</Command>
+        </Verification>
+      </T-002>
+      <T-003>
+        <Title>Проверка записанного прогона и проекции GRACE</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Повторить штатный 30-тактовый LOOP и дважды вызвать replay на нём. Ожидаются 30 воспроизводимых тактов, 30 тепловых шагов, совпадение результатов обоих запусков, неизменные хэши входов и off_verified. Прогнать реплей на архивном 600-тактовом v1 и сравнить с эталоном предыдущего пакета. Зафиксировать точные команды, границы и ограничения в STATUS. Параметры живого LOOP, базовая схема raw, библиотеки физики, защиты и GUI вне области.</Criterion>
+          <Criterion>Обновить только якоря CLI и MATERIALS. Бюджеты рассчитаны как ceil(4 × максимум) + 1 с на прогретых офлайн-прогонах, после cargo test --workspace --locked --no-run. Три замера на фактической базе macOS ARM64 дали максимумы 0,23 с для fmt и 5,85 с для тестов. Проверить baseline до изменений и target и final после них. Свежая независимая Astra проверяет итоговое дерево и отдельно разрешает APPLY. Для каждого коммита нужны общий PASS и Simplicity PASS.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo fmt --all -- --check</Command>
+          <Command>cargo build --workspace --locked</Command>
+          <Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command>
+          <Command>cargo test --workspace --locked</Command>
+          <Command>cargo run --release --locked -p cvtl-sim --example m7_a1_loop</Command>
+        </Verification>
+      </T-003>
+    </ImplementationPlan>
+  </C-CVTL-M7-A1-REPLAY>
+</GraceChangePlan>
