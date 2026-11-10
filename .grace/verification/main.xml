@@ -75,8 +75,8 @@
     </V-M-CVTL-SIM>
     <V-M-CVTL-STORE>
       <Command>cargo metadata --locked --no-deps --format-version 1</Command>
-      <Scenario>Структурная проверка зарезервированного крейта по cargo metadata. Writer и файловые тесты запланированы.</Scenario>
-      <TraceAssertion>Только структурная проверка: cvtl-store зарегистрирован в workspace и не объявляет зависимостей. Файловые проверки запланированы в RECORDING.</TraceAssertion>
+      <Scenario>Получение Cargo metadata в JSON для ручной проверки зарезервированного крейта и зависимостей workspace.</Scenario>
+      <TraceAssertion>Успешный запуск подтверждает получение metadata. Наличие cvtl-store и направления зависимостей проверяются по содержимому JSON отдельно. Файловые проверки запланированы в RECORDING.</TraceAssertion>
     </V-M-CVTL-STORE>
     <V-M-CVTL-DAEMON>
       <Command>cargo run --locked -p cvtl-daemon -- config/simulator.yaml</Command>
