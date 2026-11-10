@@ -1,0 +1,79 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M7-A1-SCENARIO>
+    <IntentSummary>Добавить настраиваемый профиль A1 v2 на базе 4bb7bd0. Общая сборка Body и Bridge, одна запись смены параметров и один тракт реплея. Реализация начинается с тестов после отдельного утверждения плана.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist><Value>.grace/changes/archive/C-CVTL-M7-A1-REPLAY/plan.xml</Value><Value>crates/cvtl-cli/tests/m7_a1_replay.rs</Value><Value>M-CVTL-PHYSICS</Value><Value>M-CVTL-MATERIALS</Value><Value>M-CVTL-SIM</Value><Value>M-CVTL-STORE</Value><Value>M-CVTL-CLI</Value></MustExist>
+      <MustNotExist><Value>crates/cvtl-physics/src/scenario.rs</Value></MustNotExist>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist><Value>crates/cvtl-physics/src/scenario.rs</Value><Value>crates/cvtl-physics/tests/scenario.rs</Value></MustExist>
+      <MustVerify><Module>M-CVTL-PHYSICS</Module><Module>M-CVTL-MATERIALS</Module><Module>M-CVTL-SIM</Module><Module>M-CVTL-STORE</Module><Module>M-CVTL-CLI</Module></MustVerify>
+      <MustContain><File>crates/cvtl-store/src/record.rs</File><Text>mass_kg</Text></MustContain>
+      <MustContain><File>crates/cvtl-cli/src/replay/profile.rs</File><Text>test_only_a1_loop_v2</Text></MustContain>
+      <MustContain><File>crates/cvtl-cli/src/replay/profile.rs</File><Text>test_only_a1_loop_v1</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="2">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="33">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-PHYSICS /><M-CVTL-MATERIALS /><M-CVTL-SIM /><M-CVTL-STORE /><M-CVTL-CLI /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-PHYSICS /><V-M-CVTL-MATERIALS /><V-M-CVTL-SIM /><V-M-CVTL-STORE /><V-M-CVTL-CLI /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.lock</File>
+      <File>crates/cvtl-physics/Cargo.toml</File>
+      <File>crates/cvtl-physics/src/lib.rs</File>
+      <File>crates/cvtl-physics/src/scenario.rs</File>
+      <File>crates/cvtl-physics/tests/scenario.rs</File>
+      <File>crates/cvtl-materials/src/lib.rs</File>
+      <File>crates/cvtl-materials/tests/curves.rs</File>
+      <File>crates/cvtl-store/src/record.rs</File>
+      <File>crates/cvtl-store/tests/records.rs</File>
+      <File>crates/cvtl-sim/Cargo.toml</File>
+      <File>crates/cvtl-sim/src/a1.rs</File>
+      <File>crates/cvtl-sim/src/recording.rs</File>
+      <File>crates/cvtl-cli/src/replay/a1.rs</File>
+      <File>crates/cvtl-cli/src/replay/profile.rs</File>
+      <File>crates/cvtl-cli/tests/m7_a1_replay.rs</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/STATUS.md</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Общая сборка тела и моста</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала тесты. Добавить BodySetup и тегированный BridgeSetup в cvtl-physics, workspace serde. Одна функция из материала, массы, начальной температуры, scale, описания моста и исходного tf строит существующие Body и Bridge из переданного текста каталога. Виды моста: постоянный, проводник, таблица G(T), последовательные контакт и проводник. SI единицы, существующие проверки Body и Bridge::flow проверяют численные значения и применимость при исходных температурах. Не добавлять физические уравнения или отдельный интегратор.</Criterion>
+          <Criterion>Обычный nist_conductivity и новый nist_conductivity_from_catalog используют один действующий разбор. Тест проверяет побитовое совпадение встроенного и архивного k(T), изменение значения при изменённом коэффициенте и отказ при отсутствующей строке. Сборка всех четырёх мостов сравнивается с существующим Bridge::flow при теле 30 К и tf 16 К с допуском 1e-12 Вт. Отрицательные проверки включают неизвестный материал, выход за диапазон, неположительную массу, контакт или геометрию, недопустимую таблицу и scale.</Criterion>
+          <Criterion>Body применяет mass и scale через один вызов существующего reconfigure. Пропущенное значение берётся из самого Body, cp остаётся исходным. Live и replay используют этот метод и убирают копии cp и текущей массы. При недопустимых значениях тело сохраняет состояние. Аналитический эталон dH использует изменение m × scale и интеграл исходного cp до T перед сменой.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-physics --test scenario</Command><Command>cargo test --locked -p cvtl-materials --test curves</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Снимок A1 v2, смена параметров и единый реплей</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала тесты записи и файлового прогона. В A1ChangeV1 добавить опциональное mass_kg с default и пропуском None. Масса положительна и конечна, dH_event_j требуется при наличии массы или scale. Сохраняются номер raw-схемы, контейнер a1_step_v1 и представление старых записей. В v1 реплей отвергает блок с массой.</Criterion>
+          <Criterion>Существующий new_a1 и его v1 снимок сохраняются. Настраиваемый конструктор собирает Body и Bridge тем же описанием до открытия writer и публикации начальных температур. Новый профиль требует точную пару test_only_a1_loop_v2 в meta и YAML. Сохраняются synthetic, port=tf, additional_load, нулевой паразитный приток тела и исходные условия головы. В test_only.a1 вложить BodySetup через yaml_serde, приложить тот же использованный nist_csv. У реплея остаётся одна ветка вычисления после разбора двух форматов. Он строит v2 из проверенного буфера архива и использует указанное исходное tf. Без нового транспортного или аппаратного кода.</Criterion>
+          <Criterion>В одном RecordingLoop и одной очереди pending разрешить необязательные mass, scale и G. Сначала пройти интервал со старым мостом и телом, затем применить изменение массы и scale одним пересчётом и обновить постоянный G. В одном Inputs сохраняются результат смены, тепловой шаг и запрос. Сохранить существующее разрешение управления через принятые входы и M5. Запрос G для непостоянного моста, масса в v1, пустая, некорректная и вторая ожидающая команда отклоняются до мутации. В реплее повторить эти ограничения при разборе применённых изменений.</Criterion>
+          <Criterion>Файловый тест constant v2 использует 20 кг OFHC, scale 0,1 и G=0,02 Вт/К. После первого такта отдельно поменять массу на 10 кг, отдельно scale на 0,2, затем вместе массу на 16 кг и scale на 0,15. Следом G=0,04 Вт/К и такт без смены. Сравнить температуру до и после смены с допуском 1e-6 К, знаковый dH с допуском 1e-6 Дж, запрос на такте с G × (T тела − свежее tf) с допуском 1e-12 Вт. Смена массы при непрерывной температуре меняет дальнейшую траекторию, мгновенный поток при том же мосте и tf сохраняется. Проверить Drive, подтверждённый OFF, успешный реплей всех тактов и неизменность файлов.</Criterion>
+          <Criterion>Проверить подмены массы и отдельно scale или G в целостном кадре, а также массы в снимке с обновлённым SHA. Второй v2 файловый прогон использует проводник OFHC с A=1e-6 м² и L=0,10 м. Подмена его строки k(T) с обновлённым SHA даёт несовпадение вычислений, что подтверждает использование архива. Проверить отказ смены G для проводника и несовместимость meta/YAML профилей. Номинальный 20 кг v1 проходит прежний тест и сохраняет байтовое представление.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-store --test records</Command><Command>cargo test --locked -p cvtl-sim --test a1_loop</Command><Command>cargo test --locked -p cvtl-cli --test m7_a1_replay</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Свидетельства и приёмка пакета</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Обновить согласованные граф и проверки. Проверить побайтовое совпадение отчётов на архивных прогонах RECORDING v1 и LOOP v1 с исходными отчётами, хэши исходных файлов и тесты нового профиля. В STATUS записать команды, подтверждённые результаты и границы. GUI, изменение конфигов поставки, оценка холодопроизводительности и аппаратные проверки остаются вне области.</Criterion>
+          <Criterion>Бюджеты равны ceil(4 × максимум) + 1 с. Три прогретых прогона на фактической базе macOS ARM64 после cargo test --workspace --locked --no-run дали максимумы 0,21 с для fmt и 7,99 с для тестов. Выполнить baseline до исполнения, target и final после. Каждый коммит проходит независимое ревью точного дерева с гейтом простоты. Новая Astra отдельно разрешает APPLY после свежего final.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo fmt --all -- --check</Command><Command>cargo build --workspace --locked</Command><Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command><Command>cargo test --workspace --locked</Command></Verification>
+      </T-003>
+    </ImplementationPlan>
+  </C-CVTL-M7-A1-SCENARIO>
+</GraceChangePlan>
