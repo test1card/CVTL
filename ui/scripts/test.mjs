@@ -4,6 +4,7 @@ import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { resolve, extname, sep } from "node:path";
 import assert from "node:assert/strict";
 const root = resolve("dist");
+const locale = "ru-RU";
 const server = createServer(async (req, res) => {
   try {
     const path = resolve(
@@ -48,6 +49,7 @@ try {
       browser: browser.version(),
       platform: process.platform,
       architecture: process.arch,
+      locale,
       samples: 30,
       metric: "click handler through second requestAnimationFrame, ms",
     },
@@ -58,6 +60,7 @@ try {
       const name = `${framework}-${library}`;
       console.log(`Testing ${name}`);
       const page = await browser.newPage({
+        locale,
         viewport: { width: 1100, height: 900 },
       });
       const errors = [];
