@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="approved">
+<GraceChangePlan graceVersion="4.0" status="applied">
   <C-CVTL-M7-A1-REPLAY>
     <IntentSummary>Расширить одну команду replay на профиль A1 на базе f811a09ee05110bd87771e2949ada56c72d8be5d. Пересчитать тело и решения, сохранить наблюдения и причинные свидетельства отдельно. Тесты предшествуют коду, реализация начинается после отдельного утверждения плана.</IntentSummary>
     <BaselineAssertions>

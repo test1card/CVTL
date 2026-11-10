@@ -1,4 +1,4 @@
-<GraceChangeSpec graceVersion="4.0" status="approved">
+<GraceChangeSpec graceVersion="4.0" status="applied">
   <C-CVTL-M7-A1-REPLAY>
     <Summary>Расширить существующий офлайн-реплей на замкнутый профиль A1 по §12.4 и §14.4 ТЗ, ADR 0003 и критериям 8 и 14 GOAL.md.</Summary>
     <Problem>Профиль LOOP хранит температуры, интервальную энергию, параметры тела и смены scale и моста. Текущий реплей принимает только test_only_m6_recording_v1. Требуется отдельно проверить вычисления тела и сохранить смысл свидетельств M5 в записанном A1.</Problem>
