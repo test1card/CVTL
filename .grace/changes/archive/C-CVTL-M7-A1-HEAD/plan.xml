@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="approved">
+<GraceChangePlan graceVersion="4.0" status="applied">
   <C-CVTL-M7-A1-HEAD>
     <IntentSummary>Добавить синтетическую головку A1 и проверить связь с уже работающими loopback-эмуляторами на базе 6416acd689b1acea7c8361b5428d1796aa81ea6a. Один чистый шаг тепловой модели, один расчёт фактического I/V внутри эмулятора и один обновляемый набор температур. Полный контур A1 остаётся отдельным пакетом. Выполнять последовательно, начинать с тестов.</IntentSummary>
     <BaselineAssertions>
