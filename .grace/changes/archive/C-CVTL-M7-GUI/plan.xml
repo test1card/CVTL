@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="approved">
+<GraceChangePlan graceVersion="4.0" status="applied">
   <C-CVTL-M7-GUI>
     <IntentSummary>Пять рабочих экранов на базе 73933997c40b006bac3399b402d6f3e1aaabde0d. Выпускной интерфейс раздаёт cvtl-daemon по IPv4 loopback. Один владелец A1 и M5, принятые события для живого экрана, проверенный реплей для истории. Исполнение начинается после отдельного утверждения плана и baseline.</IntentSummary>
     <BaselineAssertions>
