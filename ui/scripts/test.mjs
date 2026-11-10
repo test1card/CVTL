@@ -56,15 +56,41 @@ try {
   for (const framework of ["svelte", "react"]) {
     for (const library of ["uplot", "echarts"]) {
       const name = `${framework}-${library}`;
-      const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
+      console.log(`Testing ${name}`);
+      const page = await browser.newPage({
+        viewport: { width: 1100, height: 900 },
+      });
       const errors = [];
-      page.on("pageerror", (e) => errors.push(e.message));
+      page.on("pageerror", (error) => {
+        const message = `page error: ${error.stack || error.message}`;
+        errors.push(message);
+        console.error(`[${name}] ${message}`);
+      });
+      page.on("response", (response) => {
+        if (!response.ok()) {
+          const message = `HTTP ${response.status()}: ${response.url()}`;
+          errors.push(message);
+          console.error(`[${name}] ${message}`);
+        }
+      });
+      page.on("requestfailed", (request) => {
+        const message = `request failed: ${request.url()} ${request.failure()?.errorText}`;
+        errors.push(message);
+        console.error(`[${name}] ${message}`);
+      });
       page.on("request", (r) => {
         if (!r.url().startsWith(origin + "/"))
           errors.push(`external request: ${r.url()}`);
       });
       await page.goto(`${origin}/${name}/`, { waitUntil: "networkidle" });
-      await page.locator("canvas").first().waitFor();
+      try {
+        await page.locator("canvas").first().waitFor();
+      } catch (error) {
+        throw new Error(
+          `${name}: graph canvas unavailable; page errors: ${JSON.stringify(errors)}`,
+          { cause: error },
+        );
+      }
       assert.equal(await page.locator("svg").count(), 1);
       const before = await page.locator(".plot").screenshot();
       await page.getByRole("button", { name: "Мощность" }).click();
