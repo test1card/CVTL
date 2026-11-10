@@ -1,0 +1,100 @@
+<GraceChangePlan graceVersion="4.0" status="approved">
+  <C-CVTL-M6-IMPORT>
+    <IntentSummary>Офлайн-импорт таблицы этапа I на базе 6dca5add2c6a08583232c61350bbae5d19a81e2e с сохранением опубликованных значений. Один типизированный импортёр в cvtl-analysis и одна команда cvtl-cli import-stage-i. Отдельная производная таблица содержит только штатные опорные точки для будущей синтетической головки A1. Работать последовательно, начиная с тестов.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist>
+        <Value>M-CVTL-CLI</Value>
+        <Value>M-CVTL-CORE</Value>
+        <Value>.grace/changes/archive/C-CVTL-M6-REPLAY/spec.xml</Value>
+        <Value>crates/cvtl-analysis/src/lib.rs</Value>
+      </MustExist>
+      <MustOwn><Owner>GD-MAIN</Owner><Anchor>M-CVTL-CLI</Anchor></MustOwn>
+      <MustContain><File>crates/cvtl-analysis/src/lib.rs</File><Text>Reserved boundary for the analysis milestone.</Text></MustContain>
+      <MustNotExist>
+        <Value>M-CVTL-ANALYSIS</Value>
+        <Value>crates/cvtl-analysis/src/stage_i.rs</Value>
+        <Value>data/old_tests/kde420sa_stage_i_legacy.csv</Value>
+        <Value>data/machines/kde420sa_stage1_data.csv</Value>
+      </MustNotExist>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist>
+        <Value>crates/cvtl-analysis/src/stage_i.rs</Value>
+        <Value>crates/cvtl-analysis/tests/stage_i.rs</Value>
+        <Value>crates/cvtl-cli/tests/m6_import.rs</Value>
+        <Value>data/old_tests/README.md</Value>
+        <Value>data/old_tests/kde420sa_stage_i_legacy.csv</Value>
+        <Value>data/machines/kde420sa_stage1_data.csv</Value>
+      </MustExist>
+      <MustOwn><Owner>GD-MAIN</Owner><Anchor>M-CVTL-ANALYSIS</Anchor></MustOwn>
+      <MustOwn><Owner>VD-MAIN</Owner><Anchor>V-M-CVTL-ANALYSIS</Anchor></MustOwn>
+      <MustLink><From>M-CVTL-CLI</From><To>M-CVTL-ANALYSIS</To></MustLink>
+      <MustLink><From>M-CVTL-ANALYSIS</From><To>M-CVTL-CORE</To></MustLink>
+      <MustVerify><Module>M-CVTL-CLI</Module><Module>M-CVTL-ANALYSIS</Module></MustVerify>
+      <MustContain><File>crates/cvtl-cli/src/main.rs</File><Text>import-stage-i</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="3">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="23">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-CLI /><M-CVTL-ANALYSIS /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-CLI /><V-M-CVTL-ANALYSIS /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.lock</File>
+      <File>crates/cvtl-analysis/Cargo.toml</File>
+      <File>crates/cvtl-analysis/src/lib.rs</File>
+      <File>crates/cvtl-analysis/src/stage_i.rs</File>
+      <File>crates/cvtl-analysis/tests/stage_i.rs</File>
+      <File>crates/cvtl-cli/Cargo.toml</File>
+      <File>crates/cvtl-cli/src/main.rs</File>
+      <File>crates/cvtl-cli/tests/m6_import.rs</File>
+      <File>data/old_tests/README.md</File>
+      <File>data/old_tests/kde420sa_stage_i_legacy.csv</File>
+      <File>data/machines/kde420sa_stage1_data.csv</File>
+      <File>.grace/graph/index.xml</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/index.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/STATUS.md</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Транскрипция, типизированный импорт и опорная проекция</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Первый тест добавляется до парсера. Локальный fixture содержит ровно восемь опубликованных строк §2.3 в прежнем порядке. README указывает источник, восстановление исторических заголовков из нормализованной таблицы, единицы, условия без жидкого азота и экрана, пустые токи строки 1 и сомнение у исторической T2 строки 8. Транскрипция не объявляется оригиналом журнала.</Criterion>
+          <Criterion>Один строгий парсер фиксированной CSV-схемы в cvtl-analysis переиспользует величины cvtl-core и явную перестановку T1 → stage2, T2 → stage1. Проверяются заголовки, число и порядок строк, конечность и переполнение расчёта. Опубликованная мощность отдельно от U × I по ветвям и суммы. При неизвестном токе результат расчёта остаётся неизвестным. Нули и признак сомнения сохранены. В результатах только канонические имена ступеней.</Criterion>
+          <Criterion>Из типизированных точек детерминированно строится data/machines/kde420sa_stage1_data.csv с колонками stage2_k,p_net_w,stage1_k. Номинальные опоры из строк 1–6 сохраняют опубликованную подведённую мощность. Строка 7 остаётся в импорте с инверсией, строка 8 остаётся с сомнением и вне опор. Не корректировать паразитные притоки и не строить продолжение модели. Тест сравнивает вычисленную проекцию с поставляемым CSV побайтно.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-analysis --test stage_i</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Одна офлайн-команда импорта</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>После теста добавить cvtl-cli import-stage-i ФАЙЛ. Команда читает ограниченный локальный файл, переиспользует типизированный импорт и выводит JSON с SHA-256 фактического источника, ссылкой на формат §2.3, условиями опыта, восемью точками и идентификаторами штатных опор. Формат известного источника указывается отдельно от его подлинности. Исходные и опорные файлы не перезаписываются.</Criterion>
+          <Criterion>Сквозные тесты проверяют повторяемый вывод, обе части перестановки исторических колонок, нули и пропуски, различие мощности в строке 4, инверсию и сомнение, отклонение неверного файла и неизменность хэша. CLI добавляет только локальную зависимость cvtl-analysis, analysis только cvtl-core. Переиспользовать уже доступные в CLI serde_json и sha2. Cargo.lock обновить без новых внешних библиотек.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-cli --test m6_import</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Проекции и приёмка пакета</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Зарегистрировать новые ANALYSIS якоря в главных проекциях и индексах. Обновить CLI связи и проверки. Разметить затронутые Rust-файлы. Проверить обычный Cargo-граф analysis и CLI без приборных зависимостей, сохранение hardware_enabled и утверждённых RECORDING/REPLAY. STATUS фиксирует прогоны и остающуюся проверку оригинального фото.</Criterion>
+          <Criterion>Бюджеты target относятся к прогретому offline-прогону после cargo test --workspace --locked --no-run. Три измерения на неизменённом runtime REPLAY дают максимумы 0,2911 с для fmt и 5,3046 с для workspace tests. Бюджет ceil(4 × максимум) + 1 с. До правок baseline, после — target и final. Каждый точный коммит проходит общий PASS и Simplicity PASS Astra.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo fmt --all -- --check</Command>
+          <Command>cargo build --workspace --locked</Command>
+          <Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command>
+          <Command>cargo test --workspace --locked</Command>
+        </Verification>
+      </T-003>
+    </ImplementationPlan>
+  </C-CVTL-M6-IMPORT>
+</GraceChangePlan>
