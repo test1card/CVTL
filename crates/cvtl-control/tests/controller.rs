@@ -167,6 +167,24 @@ fn setpoint_change_with_a_small_integrator_bound_is_bumpless() {
 }
 
 #[test]
+fn soft_target_limit_uses_slew_and_keeps_the_requested_power() {
+    let mut c = controller(fixture());
+    let demand = Demand::Power(w(4.0));
+    let permit = HeatPermit::Limit(w(12.0));
+    c.tick(tick(0.0, demand, permit)).unwrap();
+    let before = c.tick(tick(0.1, demand, permit)).unwrap();
+    assert!(before.limited.get() > 1.5);
+    let after = c
+        .tick_with_target_limit(tick(0.2, demand, permit), Some(w(0.5)))
+        .unwrap();
+    assert_eq!(after.requested, Some(w(4.0)));
+    assert!(after.limited > w(0.5) && after.limited < before.limited);
+    assert!(before.limited.get() - after.limited.get() <= 1.0 + 1e-12);
+    assert!(after.power_limited && after.slew_limited);
+    assert_eq!(after.fault, None);
+}
+
+#[test]
 fn failures_stop_both_branches_and_do_not_resume_on_recovery() {
     let mut c = controller(fixture());
     let permit = HeatPermit::Limit(w(12.0));

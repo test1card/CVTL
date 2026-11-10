@@ -204,6 +204,16 @@ impl<T: MessageTransport> Keithley<T> {
         self.recovered = false;
         self.configs = [None, None];
         self.identity(d)?;
+        self.off_pair(d)?;
+        self.recovered = true;
+        Ok(())
+    }
+    /// Issue OFF on both channels before waiting for either logical readback.
+    pub fn disable_both(&mut self, d: Instant) -> Result<()> {
+        self.require_ready()?;
+        self.off_pair(d)
+    }
+    fn off_pair(&mut self, d: Instant) -> Result<()> {
         for c in [Channel::A, Channel::B] {
             let n = c.name();
             self.send(&format!("{n}.source.output = {n}.OUTPUT_OFF"), d)?;
@@ -214,7 +224,6 @@ impl<T: MessageTransport> Keithley<T> {
                 return Err(InstrumentError::Unverified);
             }
         }
-        self.recovered = true;
         Ok(())
     }
     fn reported(&mut self, c: Channel, d: Instant) -> Result<OutputState> {

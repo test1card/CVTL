@@ -11,3 +11,4 @@ cvtl-instruments = { path = "../cvtl-instruments" }
 [dev-dependencies]
 cvtl-control = { path = "../cvtl-control" }
 cvtl-envelope = { path = "../cvtl-envelope" }
+cvtl-safety = { path = "../cvtl-safety" }

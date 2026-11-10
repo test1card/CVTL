@@ -5,7 +5,9 @@ use crate::{
     allocation::Allocator,
     pi::{Pi, PiConfig, PowerSample},
 };
-use cvtl_core::units::{Amperes, Kelvin, Seconds, Watts, WattsPerKelvin, WattsPerKelvinSecond};
+use cvtl_core::units::{
+    Amperes, Kelvin, Seconds, Volts, Watts, WattsPerKelvin, WattsPerKelvinSecond,
+};
 use cvtl_envelope::{advise, check_current, ChannelSpec, Margins, ResistanceRange};
 
 #[derive(Clone, Copy, Debug)]
@@ -66,6 +68,13 @@ pub enum Actuation {
     /// The caller must request output OFF on both branches.
     Off,
     Drive([Amperes; 2]),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CommandBound {
+    pub current: Amperes,
+    pub sense_voltage: Volts,
+    pub heater_power: Watts,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,11 +221,41 @@ impl Controller {
         self.clear_output_history();
     }
 
+    /// Upper load-side quantities over the resistance intervals used by M4.
+    pub fn command_bounds(&self, currents: [Amperes; 2]) -> Option<[CommandBound; 2]> {
+        let bound = |i: usize| {
+            let current = currents[i];
+            let (_, resistance) = self.config.branches[i].resistance.bounds();
+            if current.get() < 0.0 {
+                return None;
+            }
+            Some(CommandBound {
+                current,
+                sense_voltage: Volts::new(current.get() * resistance.get())?,
+                heater_power: Watts::new(upper_power(current, resistance.get()))?,
+            })
+        };
+        Some([bound(0)?, bound(1)?])
+    }
+
     pub fn tick(&mut self, tick: Tick) -> Result<ControlOutput, ControlError> {
+        self.tick_with_target_limit(tick, None)
+    }
+
+    /// Apply a soft reduction to the requested target before slew limiting.
+    /// The original request and the independent hard permit remain distinct.
+    pub fn tick_with_target_limit(
+        &mut self,
+        tick: Tick,
+        target_limit: Option<Watts>,
+    ) -> Result<ControlOutput, ControlError> {
         let requested = match tick.demand {
             Demand::Power(p) | Demand::PowerProfile(p) | Demand::VirtualBody(p) => Some(p),
             _ => None,
         };
+        if target_limit.is_some_and(|limit| limit.get() < 0.0) {
+            return Ok(self.latch(Fault::Calculation, requested, None));
+        }
         let dt = tick.dt.get();
         if dt <= 0.0
             || tick.now.get() < 0.0
@@ -300,7 +339,7 @@ impl Controller {
         }
         let mut next = self.clone();
         next.stale_held = false;
-        match next.drive(tick, cap, samples, measured) {
+        match next.drive(tick, cap, target_limit, samples, measured) {
             Ok(output) => {
                 *self = next;
                 Ok(output)
@@ -376,10 +415,12 @@ impl Controller {
         &mut self,
         tick: Tick,
         cap: f64,
+        target_limit: Option<Watts>,
         samples: [TimedPowerSample; 2],
         measured: Option<Watts>,
     ) -> Result<ControlOutput, Fault> {
-        let (mode, request) = self.request(tick, cap)?;
+        let target_cap = target_limit.map_or(cap, |limit| cap.min(limit.get()));
+        let (mode, request) = self.request(tick, target_cap)?;
         if request.get() < 0.0 {
             let mut out = self.off(Some(request), measured, Equivalence::Limited);
             out.power_limited = true;
@@ -395,6 +436,7 @@ impl Controller {
         } else {
             request
         };
+        let reference = Watts::new(reference.get().min(target_cap)).expect("finite target cap");
         let allocation = self
             .allocator
             .step(
@@ -406,6 +448,7 @@ impl Controller {
             )
             .map_err(|_| Fault::Calculation)?;
         let power_limited = allocation.hard_limit
+            || request.get() > target_cap
             || request.get() > capacities.iter().map(|value| value.get()).sum::<f64>();
         let mut currents = [zero_current(); 2];
         let mut current_limited = false;
