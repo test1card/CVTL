@@ -1,0 +1,85 @@
+<GraceChangePlan graceVersion="4.0" status="approved">
+  <C-CVTL-M7-A1-HEAD>
+    <IntentSummary>Добавить синтетическую головку A1 и проверить связь с уже работающими loopback-эмуляторами на базе 6416acd689b1acea7c8361b5428d1796aa81ea6a. Один чистый шаг тепловой модели, один расчёт фактического I/V внутри эмулятора и один обновляемый набор температур. Полный контур A1 остаётся отдельным пакетом. Выполнять последовательно, начинать с тестов.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist>
+        <Value>M-CVTL-SIM</Value>
+        <Value>.grace/changes/archive/C-CVTL-M6-IMPORT/spec.xml</Value>
+        <Value>crates/cvtl-sim/tests/m6_recording.rs</Value>
+        <Value>crates/cvtl-cli/tests/m6_replay.rs</Value>
+      </MustExist>
+      <MustOwn><Owner>GD-MAIN</Owner><Anchor>M-CVTL-SIM</Anchor></MustOwn>
+      <MustOwn><Owner>VD-MAIN</Owner><Anchor>V-M-CVTL-SIM</Anchor></MustOwn>
+      <MustNotExist><Value>crates/cvtl-sim/src/head.rs</Value><Value>crates/cvtl-sim/tests/a1_head.rs</Value></MustNotExist>
+      <MustContain><File>crates/cvtl-sim/src/lakeshore.rs</File><Text>+42.000</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist><Value>crates/cvtl-sim/src/head.rs</Value><Value>crates/cvtl-sim/tests/a1_head.rs</Value></MustExist>
+      <MustOwn><Owner>GD-MAIN</Owner><Anchor>M-CVTL-SIM</Anchor></MustOwn>
+      <MustOwn><Owner>VD-MAIN</Owner><Anchor>V-M-CVTL-SIM</Anchor></MustOwn>
+      <MustVerify><Module>M-CVTL-SIM</Module></MustVerify>
+      <MustContain><File>crates/cvtl-sim/src/lib.rs</File><Text>pub mod head</Text></MustContain>
+      <MustContain><File>crates/cvtl-sim/src/keithley.rs</File><Text>delivered_power</Text></MustContain>
+      <MustContain><File>crates/cvtl-sim/src/lakeshore.rs</File><Text>set_temperatures</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="3">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="19">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-SIM /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-SIM /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>crates/cvtl-sim/src/lib.rs</File>
+      <File>crates/cvtl-sim/src/head.rs</File>
+      <File>crates/cvtl-sim/src/keithley.rs</File>
+      <File>crates/cvtl-sim/src/lakeshore.rs</File>
+      <File>crates/cvtl-sim/tests/a1_head.rs</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/STATUS.md</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Энергобаланс синтетической головки</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>До реализации добавить аналитические тесты. Один модуль head хранит три температуры stage1, stage2 и tf, три положительные теплоёмкости и две неотрицательные проводимости stage1↔stage2 и tf↔stage2. На шаге тепло ветвей поступает в tf, положительная заданная холодопроизводительность отводится из stage1 и stage2. Поток G·ΔT по каждой связи вычитается у донора и прибавляется получателю. Только синтетическая модель с типами единиц cvtl-core, без добавочных зависимостей.</Criterion>
+          <Criterion>Явный шаг по потокам в начале интервала. Для каждого узла dt × сумма проводимостей не превосходит его теплоёмкость. Недопустимые шаг, входы, переполнение и переход ниже 0 K отклоняются без изменения состояния. Эталон для разомкнутых связей: C = (10,20,5) Дж/К, T = (40,10,12) К, суммарный нагрев tf 3 Вт, отвод (2,4) Вт, четыре шага по 0,5 с. Ответ (39,6;9,6;13,2) К, изменение энергии −6 Дж. Для проверки связей взять G = (0,5;1) Вт/К, тот же старт, шаг 0,1 с без внешней мощности. Ответ (39,85;10,085;11,96) К, суммарная энергия сохраняется. Допуски эталонов 1e-9 К и 1e-9 Дж.</Criterion>
+          <Criterion>Все численные значения являются синтетическими test_only. Холодопроизводительность задаётся на входе отдельно от состояния и сохраняется в тесте как известная истина для будущей проверки. Исторические опорные точки не подменяют этот эталон.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-sim --test a1_head thermal_</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Фактический нагрев и динамическая термометрия по loopback</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>До правок добавить loopback-тест. Снимок delivered_power читает состояние обеих ветвей атомарно и переиспользует расчёт I/V из measure.iv(). Проверить совпадение с измерением при обычной нагрузке, compliance и OFF. В тесте обрыв запроса измерения оставляет фактическое состояние источника неизменным до явной команды отключения. В головку поступает U × I, без добавления запроса или тепла виртуального моста.</Criterion>
+          <Criterion>Один атомарно заменяемый набор температур Lake Shore для восьми каналов. Сохранить default 42 K, прежний формат ответа KRDG и остальные ответы и отказы протокола. В тестовом сценарии после шага модели читаются разные stage1/stage2, tf и заданный jacket по существующему драйверу. Недопустимые температуры не заменяют прежний набор. Полный владелец контура и RECORDING/REPLAY v1 не меняются.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo test --locked -p cvtl-sim --test a1_head</Command>
+          <Command>cargo test --locked -p cvtl-sim --test keithley_integration --test lakeshore_protocol --test m6_recording</Command>
+          <Command>cargo test --locked -p cvtl-cli --test m6_replay</Command>
+        </Verification>
+      </T-002>
+      <T-003>
+        <Title>Границы, проекции и проверка пакета</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Разметить только затронутые runtime-модули cvtl-sim и обновить только его проекции. Зафиксировать уравнения синтетического шага, исходные значения эталонов, результаты и оставшиеся границы в STATUS. Сохранить старые конфиги, зависимости, RECORDING/REPLAY v1 и аппаратные драйверы. Каждое дерево к коммиту проходит общий PASS и Simplicity PASS Astra.</Criterion>
+          <Criterion>Бюджеты target относятся к прогретому offline-прогону после cargo test --workspace --locked --no-run. Три измерения на базе M6 macOS ARM64 с Rust 1.94.1 дали максимумы 0,2913 с для fmt и 4,4780 с для workspace tests. Бюджет ceil(4 × максимум) + 1 с. До правок baseline, затем target и final.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo fmt --all -- --check</Command>
+          <Command>cargo build --workspace --locked</Command>
+          <Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command>
+          <Command>cargo test --workspace --locked</Command>
+        </Verification>
+      </T-003>
+    </ImplementationPlan>
+  </C-CVTL-M7-A1-HEAD>
+</GraceChangePlan>
