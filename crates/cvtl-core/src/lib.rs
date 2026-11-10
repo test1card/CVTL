@@ -1,4 +1,6 @@
-//! Shared configuration and the Phase A startup gate.
+//! Shared units, configuration, and the Phase A startup gate.
+
+pub mod units;
 
 use serde::Deserialize;
 use std::{error::Error, fmt, fs, path::Path};
