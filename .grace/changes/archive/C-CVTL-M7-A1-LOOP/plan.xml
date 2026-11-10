@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="approved">
+<GraceChangePlan graceVersion="4.0" status="applied">
   <C-CVTL-M7-A1-LOOP>
     <IntentSummary>Один замкнутый headless-сценарий A1 на базе 5015f93a81817f36068c36db54c90cda0c06efb8. Добавить учёт фактической энергии в Keithley, один профиль тела и головки в существующем RecordingLoop и версионированные данные теплового шага. Сохранить v1 и действующие границы M5. Работать последовательно, начиная с тестов.</IntentSummary>
     <BaselineAssertions>
