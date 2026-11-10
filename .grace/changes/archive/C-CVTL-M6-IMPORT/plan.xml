@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="approved">
+<GraceChangePlan graceVersion="4.0" status="applied">
   <C-CVTL-M6-IMPORT>
     <IntentSummary>Офлайн-импорт таблицы этапа I на базе 6dca5add2c6a08583232c61350bbae5d19a81e2e с сохранением опубликованных значений. Один типизированный импортёр в cvtl-analysis и одна команда cvtl-cli import-stage-i. Отдельная производная таблица содержит только штатные опорные точки для будущей синтетической головки A1. Работать последовательно, начиная с тестов.</IntentSummary>
     <BaselineAssertions>
