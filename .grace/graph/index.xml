@@ -14,6 +14,7 @@
         <M-CVTL-STORE />
         <M-CVTL-ANALYSIS />
         <M-CVTL-DAEMON />
+        <M-CVTL-GUI />
         <M-CVTL-CLI />
       </Owns>
     </GD-MAIN>

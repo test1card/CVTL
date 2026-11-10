@@ -12,6 +12,9 @@
 //   RecordingLoop - single owner of loopback effects
 //   TickReport - measured host timing
 //   Error - journal, safety or protocol failure
+//   preview_a1 - bounded ideal heat preview of the synthetic scenario
+//   test_only_source_config - source settings shared with preflight
+//   test_only_control_config - control settings shared with preflight
 // END_MODULE_MAP
 //! Sequential test-only owner. No endpoint can be provided by a runtime config.
 
@@ -55,6 +58,8 @@ use crate::{
     lakeshore::LakeShoreSim,
 };
 
+pub use crate::a1::A1PreviewPoint;
+
 pub const PERIOD: Duration = Duration::from_millis(100);
 const COMMAND_LIMIT: Duration = Duration::from_millis(250);
 const CHANNELS: [Channel; 2] = [Channel::A, Channel::B];
@@ -96,6 +101,13 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+
+/// Calculate a synthetic three-second preview using ideal, capped heat.
+pub fn preview_a1(setup: &BodySetup, cap: Watts) -> Result<Vec<A1PreviewPoint>, Error> {
+    A1Scenario::configured(setup)
+        .and_then(|scenario| scenario.preview(cap, PERIOD))
+        .map_err(Error::Scenario)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct TickReport {
@@ -253,6 +265,12 @@ impl<'a> RecordingLoop<'a> {
         )
     }
 
+    /// Set the synchronous observer before starting the recording.
+    /// The observer receives only batches accepted by the journal.
+    pub fn observe_accepted(&mut self, observer: impl FnMut(Receipt, &[Event<'_>]) + 'static) {
+        self.journal.observe_accepted(observer);
+    }
+
     pub fn new_a1(
         source: &'a KeithleySimulator,
         thermometer: &'a LakeShoreSim,
@@ -335,8 +353,8 @@ impl<'a> RecordingLoop<'a> {
             yaml.push_str(line);
             yaml.push('\n');
         }
-        let source = source_config();
-        let control = control_config();
+        let source = test_only_source_config();
+        let control = test_only_control_config();
         let profile = ProtectionProfile::test_only_example();
         use std::fmt::Write;
         write!(
@@ -435,12 +453,11 @@ impl<'a> RecordingLoop<'a> {
             return Err(error.into());
         }
         for channel in CHANNELS {
-            if let Err(error) =
-                self.keithley
-                    .as_mut()
-                    .unwrap()
-                    .configure(channel, source_config(), deadline())
-            {
+            if let Err(error) = self.keithley.as_mut().unwrap().configure(
+                channel,
+                test_only_source_config(),
+                deadline(),
+            ) {
                 self.source_failure(Correlation::Run);
                 return Err(error.into());
             }
@@ -1149,7 +1166,7 @@ fn r(value: f64) -> Ohms {
     Ohms::new(value).unwrap()
 }
 
-fn source_config() -> ChannelConfig {
+pub fn test_only_source_config() -> ChannelConfig {
     ChannelConfig {
         limit_v: v(10.0),
         limit_i: a(1.0),
@@ -1161,7 +1178,7 @@ fn source_config() -> ChannelConfig {
     }
 }
 
-fn control_config() -> ControlConfig {
+pub fn test_only_control_config() -> ControlConfig {
     let channel = ChannelSpec {
         resistance: ResistanceRange::new(r(10.0), r(11.0)).unwrap(),
         loop_resistance: r(0.0),
@@ -1192,7 +1209,7 @@ fn control_config() -> ControlConfig {
 fn controller() -> Controller {
     let rate = WattsPerSecond::new(SLEW_W_PER_S).unwrap();
     Controller::new(
-        control_config(),
+        test_only_control_config(),
         Allocator::new(None, rate, rate, [rate; 2], [rate; 2]).unwrap(),
     )
     .unwrap()

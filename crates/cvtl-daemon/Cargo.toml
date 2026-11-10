@@ -5,4 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+cvtl-cli = { path = "../cvtl-cli" }
 cvtl-core = { path = "../cvtl-core" }
+cvtl-envelope = { path = "../cvtl-envelope" }
+cvtl-materials = { path = "../cvtl-materials" }
+cvtl-physics = { path = "../cvtl-physics" }
+cvtl-safety = { path = "../cvtl-safety" }
+cvtl-sim = { path = "../cvtl-sim" }
+cvtl-store = { path = "../cvtl-store" }
+httparse = "=1.10.1"
+serde.workspace = true
+serde_json = { version = "1", features = ["float_roundtrip"] }

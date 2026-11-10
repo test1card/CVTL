@@ -198,6 +198,8 @@ struct Shared {
     events_failed: AtomicBool,
 }
 
+type AcceptedObserver = dyn FnMut(Receipt, &[Event<'_>]);
+
 pub struct Session {
     run: String,
     generation: u64,
@@ -206,6 +208,7 @@ pub struct Session {
     feedback: Consumer<Feedback>,
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
+    accepted_observer: Option<Box<AcceptedObserver>>,
     opened: bool,
     accepted: u64,
     accepted_bytes: u64,
@@ -254,6 +257,7 @@ impl Session {
             feedback,
             shared,
             worker: None,
+            accepted_observer: None,
             opened: false,
             accepted: 0,
             accepted_bytes: 0,
@@ -418,10 +422,19 @@ impl Session {
         if self.producer.is_abandoned() {
             return Err(self.fail(Failure::Writer(WriterFault::Disconnected)));
         }
-        match self.push(correlation, events) {
-            Ok(receipt) => Ok(receipt),
-            Err(failure) => Err(self.fail(failure)),
+        let receipt = self
+            .push(correlation, events)
+            .map_err(|failure| self.fail(failure))?;
+        if let Some(observer) = &mut self.accepted_observer {
+            observer(receipt, events);
         }
+        Ok(receipt)
+    }
+
+    /// Install the owner's synchronous observer for admitted batches.
+    /// The observer must do bounded work in memory without waiting or doing I/O.
+    pub fn observe_accepted(&mut self, observer: impl FnMut(Receipt, &[Event<'_>]) + 'static) {
+        self.accepted_observer = Some(Box::new(observer));
     }
 
     fn push(&mut self, correlation: Correlation, events: &[Event<'_>]) -> Result<Receipt, Failure> {
@@ -795,4 +808,86 @@ pub fn fault_issue(fault: FaultReason) -> Issue<'static> {
 
 fn nanos(duration: Duration) -> Option<u64> {
     duration.as_nanos().try_into().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn observer_sees_only_accepted_batches_and_their_receipts() {
+        let (mut session, mut writer) = Session::channel("run", 4, Duration::default).unwrap();
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let captures = Rc::clone(&observed);
+        session.observe_accepted(move |receipt, events| {
+            let actions = events
+                .iter()
+                .map(|event| match event {
+                    Event::Operator { action, .. } => (*action).to_owned(),
+                    _ => panic!("expected operator event"),
+                })
+                .collect::<Vec<_>>();
+            captures.borrow_mut().push((receipt, actions));
+        });
+        let name = String::from("arm");
+        let arm = Event::Operator {
+            action: &name,
+            at_ns: 0,
+        };
+        assert_eq!(
+            session.accept(Correlation::Request(3), std::slice::from_ref(&arm)),
+            Err(Failure::NotReady)
+        );
+        assert!(observed.borrow().is_empty());
+        writer.ready().unwrap();
+        let correlation = Correlation::Request(5);
+        let receipt = session
+            .accept(
+                correlation,
+                &[
+                    arm,
+                    Event::Operator {
+                        action: "start",
+                        at_ns: 1,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            receipt,
+            Receipt {
+                generation: 4,
+                correlation,
+                first_seq: 1,
+                last_seq: 2,
+            }
+        );
+        assert_eq!(
+            *observed.borrow(),
+            vec![(receipt, vec!["arm".into(), "start".into()])]
+        );
+        assert_eq!(writer.next_batch().unwrap().unwrap().last_seq(), 2);
+        assert!(matches!(
+            session.accept(
+                Correlation::Request(6),
+                &[
+                    Event::Operator {
+                        action: "stop",
+                        at_ns: 2,
+                    },
+                    Event::Parameters {
+                        mass_kg: Some(f64::NAN),
+                        material: None,
+                        bridge: None,
+                        dh_event_j: None,
+                        at_ns: 2,
+                    },
+                ],
+            ),
+            Err(Failure::Record(_))
+        ));
+        assert_eq!(observed.borrow().len(), 1);
+        assert!(writer.next_batch().unwrap().is_none());
+    }
 }

@@ -34,7 +34,12 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - run: cargo build --locked -p cvtl-daemon
+        working-directory: .
       - run: npm ci
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - run: npm test
+      - run: npm run build:operator
+      - run: npm run test:operator

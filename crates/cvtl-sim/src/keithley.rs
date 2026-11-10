@@ -210,6 +210,15 @@ impl KeithleySimulator {
         self.server.addr()
     }
 
+    /// Configured synthetic A/B loads in one emulator-state snapshot.
+    pub fn resistance_ohms(&self) -> [Ohms; 2] {
+        self.state
+            .lock()
+            .unwrap()
+            .loads
+            .map(|load| Ohms::new(load).expect("validated synthetic load"))
+    }
+
     /// A/B power applied to the synthetic load in one emulator-state snapshot.
     pub fn delivered_power(&self) -> io::Result<[Watts; 2]> {
         let state = self.state.lock().unwrap();

@@ -11,12 +11,15 @@
 // START_MODULE_MAP
 //   A1Scenario - single private thermal state and scenario snapshot
 //   HeldTf - validated Lake Shore observation held between steps
+//   A1PreviewPoint - bounded forecast sample
 // END_MODULE_MAP
 use std::{fmt::Write, time::Duration};
 
 use cvtl_core::units::{JoulesPerKelvin, Kelvin, Kilograms, Seconds, Watts, WattsPerKelvin};
 use cvtl_materials::nist_heat_capacity;
-use cvtl_physics::{request, scenario::BodySetup, Body, Bridge, EmulationMode, PortSample};
+use cvtl_physics::{
+    request, scenario::BodySetup, Body, Bridge, EmulationMode, PortSample, PowerRequest,
+};
 use cvtl_store::record::{A1ChangeV1, A1StepV1, Inputs, Quality, Snapshot, MAX_RUN_HEADER_BYTES};
 
 use crate::{
@@ -36,6 +39,19 @@ const HEAD_K: [f64; 3] = [45.0, 15.0, 16.0];
 const JACKET_K: f64 = 77.0;
 const CAPACITY_J_PER_K: [f64; 3] = [10.0, 20.0, 5.0];
 const HEAD_LINKS_W_PER_K: [f64; 2] = [0.05, 0.5];
+const PREVIEW_STEPS: u32 = 30;
+
+/// A point in the synthetic forecast. Power values describe the interval ending
+/// at this point. At time zero they describe the planned first interval.
+#[derive(Clone, Copy, Debug)]
+pub struct A1PreviewPoint {
+    pub time_s: f64,
+    pub body_k: f64,
+    /// Stage1, stage2, fixture and jacket temperatures in this order.
+    pub temperatures_k: [f64; 4],
+    pub bridge_w: f64,
+    pub heater_w: f64,
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct HeldTf {
@@ -161,15 +177,73 @@ impl A1Scenario {
     }
 
     pub(super) fn temperatures(&self) -> [Kelvin; 8] {
-        let head = self.head.temperatures();
         let mut temperatures = [Kelvin::new(42.0).unwrap(); 8];
-        temperatures[..4].copy_from_slice(&[
+        temperatures[..4].copy_from_slice(&self.monitored_temperatures());
+        temperatures
+    }
+
+    fn monitored_temperatures(&self) -> [Kelvin; 4] {
+        let head = self.head.temperatures();
+        [
             head.stage1,
             head.stage2,
             head.tf,
             Kelvin::new(JACKET_K).unwrap(),
-        ]);
-        temperatures
+        ]
+    }
+
+    pub(super) fn preview(
+        mut self,
+        cap: Watts,
+        period: Duration,
+    ) -> Result<Vec<A1PreviewPoint>, String> {
+        if cap.get() < 0.0 {
+            return Err("Недопустимый предел нагрева для прогноза A1".into());
+        }
+        let dt = Seconds::new(period.as_secs_f64()).unwrap();
+        let mut points = Vec::with_capacity(PREVIEW_STEPS as usize + 1);
+        for index in 0..PREVIEW_STEPS {
+            let tf = self.head.temperatures().tf;
+            let request = self.power_request(tf)?;
+            let heater = Watts::new(request.nonnegative_target.get().min(cap.get())).unwrap();
+            if index == 0 {
+                points.push(self.preview_point(Duration::ZERO, request.requested, heater));
+            }
+            self.advance_thermal(
+                dt,
+                [heater, Watts::new(0.0).unwrap()],
+                PortSample {
+                    temperature: tf,
+                    age: Seconds::new(0.0).unwrap(),
+                },
+            )?;
+            points.push(self.preview_point(period * (index + 1), request.requested, heater));
+        }
+        Ok(points)
+    }
+
+    fn preview_point(&self, time: Duration, flow: Watts, heater: Watts) -> A1PreviewPoint {
+        A1PreviewPoint {
+            time_s: time.as_secs_f64(),
+            body_k: self.body.temperature().get(),
+            temperatures_k: self.monitored_temperatures().map(Kelvin::get),
+            bridge_w: flow.get(),
+            heater_w: heater.get(),
+        }
+    }
+
+    fn advance_thermal(
+        &mut self,
+        dt: Seconds,
+        heater: [Watts; 2],
+        port: PortSample,
+    ) -> Result<(), String> {
+        self.head
+            .advance(dt, heater, [2.0, 4.0].map(|p| Watts::new(p).unwrap()))
+            .map_err(|error| error.to_string())?;
+        self.body
+            .step(dt, port, &self.bridge, Watts::new(0.0).unwrap())?;
+        Ok(())
     }
 
     pub(super) fn queue_change(
@@ -219,20 +293,15 @@ impl A1Scenario {
         let dt = Seconds::new(seconds)?;
         let heater_energy_j = interval.energy.map(|e| e.get());
         let [a, b] = heater_energy_j.map(|e| Watts::new(e / seconds));
-        self.head
-            .advance(dt, [a?, b?], [2.0, 4.0].map(|p| Watts::new(p).unwrap()))
-            .ok()?;
-        self.body
-            .step(
-                dt,
-                PortSample {
-                    temperature: held.temperature,
-                    age: Seconds::new(age.as_secs_f64())?,
-                },
-                &self.bridge,
-                Watts::new(0.0).unwrap(),
-            )
-            .ok()?;
+        self.advance_thermal(
+            dt,
+            [a?, b?],
+            PortSample {
+                temperature: held.temperature,
+                age: Seconds::new(age.as_secs_f64())?,
+            },
+        )
+        .ok()?;
 
         let mut change = None;
         if let Some(next) = self.pending.take() {
@@ -270,11 +339,12 @@ impl A1Scenario {
     }
 
     pub(super) fn demand(&self, current: HeldTf) -> Option<Watts> {
-        let flow = self
-            .bridge
-            .flow(self.body.temperature(), current.temperature)
-            .ok()?;
-        Some(request(EmulationMode::AdditionalLoad, flow).ok()?.requested)
+        Some(self.power_request(current.temperature).ok()?.requested)
+    }
+
+    fn power_request(&self, tf: Kelvin) -> Result<PowerRequest, String> {
+        let flow = self.bridge.flow(self.body.temperature(), tf)?;
+        request(EmulationMode::AdditionalLoad, flow)
     }
 }
 
@@ -286,7 +356,8 @@ fn held_age(read_started_ns: u64, interval_end_ns: u64, max_age: Duration) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use crate::recording::preview_a1;
+    use cvtl_physics::scenario::BridgeSetup;
 
     #[test]
     fn held_tf_freshness_includes_equality_and_rejects_reversed_time() {
@@ -294,5 +365,54 @@ mod tests {
         assert_eq!(held_age(10, 1_500_000_010, max_age), Some(max_age));
         assert_eq!(held_age(10, 1_500_000_011, max_age), None);
         assert_eq!(held_age(10, 9, max_age), None);
+    }
+
+    fn ofhc(temperature_k: f64) -> BodySetup {
+        BodySetup {
+            material: "ofhc_rrr100".into(),
+            mass_kg: 20.0,
+            temperature_k,
+            scale: 0.1,
+            bridge: BridgeSetup::Constant {
+                conductance_w_per_k: 0.02,
+            },
+        }
+    }
+
+    #[test]
+    fn a1_preview_matches_first_thermal_step_and_horizon() {
+        let preview = preview_a1(&ofhc(30.0), Watts::new(1.0).unwrap()).unwrap();
+        assert_eq!(preview.len(), 31);
+        assert_eq!(preview[0].time_s, 0.0);
+        assert_eq!(preview[0].temperatures_k, [45.0, 15.0, 16.0, 77.0]);
+        assert!((preview[0].body_k - 30.0).abs() < 1e-9);
+        assert_eq!(preview[1].time_s, 0.1);
+        for (actual, expected) in preview[1]
+            .temperatures_k
+            .into_iter()
+            .zip([44.965, 14.99, 15.9956, 77.0])
+        {
+            assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+        }
+        assert!((preview[1].bridge_w - 0.28).abs() < 1e-9);
+        assert!((preview[1].heater_w - 0.28).abs() < 1e-9);
+        assert!(preview[1].body_k < preview[0].body_k);
+        assert_eq!(preview[30].time_s, 3.0);
+    }
+
+    #[test]
+    fn a1_preview_retains_signed_bridge_flow_and_caps_the_ideal_heater() {
+        let cold = preview_a1(&ofhc(10.0), Watts::new(1.0).unwrap()).unwrap();
+        assert!((cold[1].bridge_w + 0.12).abs() < 1e-9);
+        assert_eq!(cold[1].heater_w, 0.0);
+        assert!(cold[1].body_k > cold[0].body_k);
+
+        let capped = preview_a1(&ofhc(30.0), Watts::new(0.1).unwrap()).unwrap();
+        assert!((capped[1].bridge_w - 0.28).abs() < 1e-9);
+        assert_eq!(capped[1].heater_w, 0.1);
+        assert!(capped
+            .iter()
+            .all(|point| (0.0..=0.1).contains(&point.heater_w)));
+        assert!(preview_a1(&ofhc(30.0), Watts::new(-1.0).unwrap()).is_err());
     }
 }

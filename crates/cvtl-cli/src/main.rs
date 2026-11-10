@@ -12,10 +12,10 @@
 //   main - CLI entry point
 // END_MODULE_MAP
 mod advisor;
-mod replay;
 mod wire;
 
 use cvtl_analysis::stage_i::{StageI, MAX_LEGACY_BYTES};
+use cvtl_cli::{quantity, run_replay};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -40,10 +40,6 @@ fn check_version(version: u32) -> Result<(), String> {
     } else {
         Err(format!("Неподдерживаемая версия схемы {version}"))
     }
-}
-
-fn quantity<T>(value: Option<T>, field: &str) -> Result<T, String> {
-    value.ok_or_else(|| format!("Неконечное значение поля {field}"))
 }
 
 fn import_stage_i(path: &Path) -> Result<String, String> {
@@ -109,7 +105,7 @@ fn run() -> Result<(String, ExitCode), String> {
         Some("heater-advisor") => {
             advisor::run(Path::new(&path)).map(|out| (out, ExitCode::SUCCESS))
         }
-        Some("replay") => replay::run(Path::new(&path)),
+        Some("replay") => run_replay(Path::new(&path)),
         Some("import-stage-i") => {
             import_stage_i(Path::new(&path)).map(|out| (out, ExitCode::SUCCESS))
         }

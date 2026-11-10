@@ -10,13 +10,15 @@
 // END_MODULE_CONTRACT
 // START_MODULE_MAP
 //   run - read-only replay command
+//   check_archive - read a bounded archive and return its verified timeline
+//   TimelineSample - accepted input and control data for one plotted tick
 // END_MODULE_MAP
 //! Recompute decisions offline and compare them to the verified raw stream.
 
 mod a1;
 mod profile;
 
-use std::{path::Path, process::ExitCode, time::Duration};
+use std::{collections::VecDeque, io::Read, path::Path, process::ExitCode, time::Duration};
 
 use cvtl_control::{pi::PowerSample, Demand, HeatPermit, Tick, TimedPowerSample};
 use cvtl_core::units::{Amperes, Kelvin, Seconds, Volts, Watts};
@@ -42,6 +44,106 @@ use crate::quantity;
 
 const MAX_OPERATION_ROWS: usize = 1024;
 const CHANNELS: [Channel; 2] = [Channel::A, Channel::B];
+const MAX_ARCHIVE_RAW_BYTES: u64 = 32 * 1024 * 1024;
+pub const TIMELINE_LIMIT: usize = 240;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TimelineSample {
+    pub tick: u64,
+    pub seq: u64,
+    pub measured_ns: u64,
+    pub temperatures_k: [Option<f64>; 4],
+    pub body_k: Option<f64>,
+    pub measured_w: [Option<f64>; 2],
+    pub requested_w: Option<f64>,
+    pub bridge_flow_w: Option<f64>,
+    pub tracking_error_w: Option<f64>,
+    pub inversion_delta_k: Option<f64>,
+    pub limited_w: Option<f64>,
+    pub targets_w: Option<[f64; 2]>,
+    pub slew_limited: bool,
+    pub power_limited: bool,
+    pub current_limited: bool,
+    pub equivalence: Option<String>,
+    pub change: Option<raw::A1ChangeV1>,
+}
+
+impl TimelineSample {
+    pub fn from_inputs(tick: u64, seq: u64, frame: &Inputs<'_>) -> Self {
+        let requested_w = match frame.demand {
+            raw::Demand::Power { requested_w }
+            | raw::Demand::PowerProfile { requested_w }
+            | raw::Demand::VirtualBody { requested_w } => Some(requested_w),
+            _ => None,
+        };
+        let bridge_flow_w = match frame.demand {
+            raw::Demand::VirtualBody { requested_w } => Some(requested_w),
+            _ => None,
+        };
+        let temperatures_k = frame.temperatures.map(|sample| {
+            sample
+                .temperature_k
+                .filter(|_| sample.quality == Quality::Measured)
+        });
+        let measured_w = frame.power.map(|sample| {
+            sample
+                .current_a
+                .zip(sample.voltage_v)
+                .map(|(current, voltage)| current * voltage)
+                .filter(|watts| sample.quality == Quality::Measured && watts.is_finite())
+        });
+        let measured_total_w = measured_w[0].zip(measured_w[1]).map(|(a, b)| a + b);
+        Self {
+            tick,
+            seq,
+            measured_ns: frame.measured_ns,
+            temperatures_k,
+            body_k: frame.a1_step_v1.map(|step| step.body_temperature_k),
+            measured_w,
+            requested_w,
+            bridge_flow_w,
+            tracking_error_w: finite_difference(measured_total_w, requested_w),
+            inversion_delta_k: finite_difference(temperatures_k[1], temperatures_k[0]),
+            limited_w: None,
+            targets_w: None,
+            slew_limited: false,
+            power_limited: false,
+            current_limited: false,
+            equivalence: None,
+            change: frame.a1_step_v1.and_then(|step| step.change),
+        }
+    }
+
+    pub fn apply_control(&mut self, event: &Event<'_>) {
+        if let Event::Control {
+            requested_w,
+            limited_w,
+            measured_w,
+            targets_w,
+            slew_limited,
+            power_limited,
+            current_limited,
+            equivalence,
+            ..
+        } = event
+        {
+            self.requested_w = requested_w.or(self.requested_w);
+            self.tracking_error_w = finite_difference(*measured_w, self.requested_w);
+            self.limited_w = *limited_w;
+            self.targets_w = *targets_w;
+            self.slew_limited = *slew_limited;
+            self.power_limited = *power_limited;
+            self.current_limited = *current_limited;
+            self.equivalence = equivalence.map(str::to_owned);
+        }
+    }
+}
+
+fn finite_difference(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    a.zip(b)
+        .map(|(a, b)| a - b)
+        .filter(|value| value.is_finite())
+}
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,13 +179,13 @@ impl Diagnostic {
 }
 
 #[derive(Serialize)]
-struct Report {
-    run: String,
-    generation: u64,
+pub struct Report {
+    pub run: String,
+    pub generation: u64,
     status: Status,
-    raw_verified_records: u64,
+    pub raw_verified_records: u64,
     raw_verified_frames: u64,
-    raw_tail: &'static str,
+    pub raw_tail: &'static str,
     replayed_ticks: u64,
     last_replayed_tick: Option<u64>,
     historical_completion: &'static str,
@@ -93,7 +195,33 @@ struct Report {
     a1: Option<a1::Summary>,
 }
 
-pub(super) fn run(dir: &Path) -> Result<(String, ExitCode), String> {
+#[derive(Serialize)]
+pub struct ArchiveReplay {
+    pub report: Report,
+    pub samples: VecDeque<TimelineSample>,
+    pub last_verified_seq: u64,
+    pub omitted_ticks: u64,
+    #[serde(skip)]
+    pub raw_matches_profile: bool,
+}
+
+pub fn run(dir: &Path) -> Result<(String, ExitCode), String> {
+    let report = compare(dir, false)?.report;
+    let code = if matches!(report.status, Status::Matched) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    };
+    serde_json::to_string(&report)
+        .map(|out| (out, code))
+        .map_err(|e| format!("Ошибка формирования отчёта: {e}"))
+}
+
+pub fn check_archive(dir: &Path) -> Result<ArchiveReplay, String> {
+    compare(dir, true)
+}
+
+fn compare(dir: &Path, archive: bool) -> Result<ArchiveReplay, String> {
     let profile = profile::load(dir)?;
     let mut replay = Replay {
         profile,
@@ -103,10 +231,35 @@ pub(super) fn run(dir: &Path) -> Result<(String, ExitCode), String> {
         last_tick: None,
         last_id: 0,
         verified_output: OutputState::Unknown,
+        last_verified_seq: 0,
+        samples: archive.then(VecDeque::new),
     };
-    let raw = profile::open_file(&dir.join("raw.ndjson.zst"))?;
-    let recovered =
-        recover(raw, |row| replay.row(row)).map_err(|e| format!("Ошибка чтения raw: {e}"))?;
+    let mut raw = profile::open_file(&dir.join("raw.ndjson.zst"))?;
+    let limit = if archive {
+        let size = raw
+            .metadata()
+            .map(|meta| meta.len())
+            .map_err(|e| format!("Ошибка чтения размера raw: {e}"))?;
+        if size > MAX_ARCHIVE_RAW_BYTES {
+            return Err("Размер raw превышает 32 МиБ".into());
+        }
+        size
+    } else {
+        u64::MAX
+    };
+    let mut raw_matches_profile = true;
+    let recovered = recover((&mut raw).take(limit), |row| {
+        // Recovery verifies one run and generation throughout the raw prefix.
+        if row.seq == 1 {
+            raw_matches_profile = row.run == replay.profile.meta.run
+                && row.generation == replay.profile.meta.generation;
+        }
+        replay.row(row);
+    })
+    .map_err(|e| format!("Ошибка чтения raw: {e}"))?;
+    if archive && raw.metadata().map(|meta| meta.len()).ok() != Some(limit) {
+        return Err("Размер raw изменился во время реплея".into());
+    }
     replay.flush();
     let (raw_tail, tail_diagnostic) = match recovered.tail {
         Tail::FrameBoundary => ("frame_boundary", None),
@@ -136,12 +289,7 @@ pub(super) fn run(dir: &Path) -> Result<(String, ExitCode), String> {
         }
     }
     let status = replay.first.as_ref().map_or(Status::Matched, |d| d.status);
-    let code = if matches!(status, Status::Matched) {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    };
-    serde_json::to_string(&Report {
+    let report = Report {
         run: replay.profile.meta.run,
         generation: replay.profile.meta.generation,
         status,
@@ -154,9 +302,15 @@ pub(super) fn run(dir: &Path) -> Result<(String, ExitCode), String> {
         output_state_at_boundary: output_name(replay.verified_output),
         first_diagnostic: replay.first,
         a1: replay.profile.a1.map(|thermal| thermal.summary),
+    };
+    let samples = replay.samples.unwrap_or_default();
+    Ok(ArchiveReplay {
+        omitted_ticks: replay.replayed - samples.len() as u64,
+        last_verified_seq: replay.last_verified_seq,
+        raw_matches_profile,
+        samples,
+        report,
     })
-    .map(|out| (out, code))
-    .map_err(|e| format!("Ошибка формирования отчёта: {e}"))
 }
 
 struct Replay {
@@ -167,6 +321,8 @@ struct Replay {
     last_tick: Option<u64>,
     last_id: u64,
     verified_output: OutputState,
+    last_verified_seq: u64,
+    samples: Option<VecDeque<TimelineSample>>,
 }
 impl Replay {
     fn row(&mut self, row: Record<'_>) {
@@ -198,10 +354,18 @@ impl Replay {
         let op = self
             .operation
             .get_or_insert_with(|| Operation::new(id, row.seq));
-        if let Err(diagnostic) = op.push(row.seq, row.event, self.profile.a1.is_some()) {
+        if let Err(diagnostic) = op.push(
+            row.seq,
+            row.event,
+            self.profile.a1.is_some(),
+            self.samples.is_some(),
+        ) {
             self.first = Some(diagnostic);
-        } else if terminal_run_record {
-            self.flush();
+        } else {
+            op.last = row.seq;
+            if terminal_run_record {
+                self.flush();
+            }
         }
     }
 
@@ -211,7 +375,13 @@ impl Replay {
         }
         if let Some(op) = self.operation.take() {
             match self.apply(&op) {
-                Ok(()) => self.verified_output = self.profile.supervisor.output_state(),
+                Ok(()) => {
+                    self.verified_output = self.profile.supervisor.output_state();
+                    self.last_verified_seq = op.last;
+                    if let (Some(samples), Some(sample)) = (&mut self.samples, op.sample) {
+                        append_sample(samples, sample);
+                    }
+                }
                 Err(diagnostic) => self.first = Some(diagnostic),
             }
         }
@@ -454,6 +624,13 @@ impl Replay {
     }
 }
 
+fn append_sample(samples: &mut VecDeque<TimelineSample>, sample: TimelineSample) {
+    if samples.len() == TIMELINE_LIMIT {
+        samples.pop_front();
+    }
+    samples.push_back(sample);
+}
+
 fn confirm_on(s: &mut Supervisor, token: RequestToken, op: &Operation) -> Result<(), Diagnostic> {
     for branch in Branch::ALL {
         if !s.can_enable(token) {
@@ -468,8 +645,10 @@ fn confirm_on(s: &mut Supervisor, token: RequestToken, op: &Operation) -> Result
 struct Operation {
     id: Correlation,
     first: u64,
+    last: u64,
     rows: usize,
     input: Option<Frame>,
+    sample: Option<TimelineSample>,
     operator: Option<(OperatorAction, Duration)>,
     expected: Vec<(u64, Vec<u8>)>,
     intents: Vec<CommandRow>,
@@ -495,8 +674,10 @@ impl Operation {
         Self {
             id,
             first,
+            last: first,
             rows: 0,
             input: None,
+            sample: None,
             operator: None,
             expected: Vec::new(),
             intents: Vec::new(),
@@ -511,7 +692,13 @@ impl Operation {
         Diagnostic::new(Status::Insufficient, self.first, Some(self.id), message)
     }
 
-    fn push(&mut self, seq: u64, event: Event<'_>, a1: bool) -> Result<(), Diagnostic> {
+    fn push(
+        &mut self,
+        seq: u64,
+        event: Event<'_>,
+        a1: bool,
+        collect_samples: bool,
+    ) -> Result<(), Diagnostic> {
         self.rows += 1;
         if self.rows > MAX_OPERATION_ROWS {
             return Err(self.insufficient("Превышен предел записей одной операции"));
@@ -535,6 +722,9 @@ impl Operation {
                         "Неподдерживаемые или неполные входы v1"
                     })
                 })?);
+                if let (true, Correlation::Tick(tick)) = (collect_samples, self.id) {
+                    self.sample = Some(TimelineSample::from_inputs(tick, seq, frame));
+                }
             }
             Event::Observation { .. } | Event::Control { .. } | Event::Operator { .. } => {
                 if let Event::Operator { action, at_ns } = event {
@@ -567,6 +757,9 @@ impl Operation {
                 }
                 if !self.intents.is_empty() {
                     return Err(self.mismatch(seq, "Решение записано после intent"));
+                }
+                if let Some(sample) = &mut self.sample {
+                    sample.apply_control(&event);
                 }
                 self.expected.push((seq, encode_event(&event)));
             }
@@ -1241,5 +1434,127 @@ mod tests {
         wire.add(3, &response(query));
         wire.add(4, &dispatch("smua.source.output = smua.OUTPUT_OFF"));
         assert!(wire.proof(Channel::A, Command::Off, 3).is_none());
+    }
+
+    #[test]
+    fn timeline_keeps_the_last_240_applied_ticks() {
+        let mut timeline = VecDeque::new();
+        for tick in 1..=245 {
+            let inputs = plotting_inputs();
+            let sample = TimelineSample::from_inputs(tick, tick * 5, &inputs);
+            append_sample(&mut timeline, sample);
+        }
+        assert_eq!(timeline.len(), TIMELINE_LIMIT);
+        assert_eq!(timeline.front().unwrap().tick, 6);
+        assert_eq!(timeline.back().unwrap().seq, 245 * 5);
+    }
+
+    #[test]
+    fn timeline_preserves_missing_measurements_and_signed_demand() {
+        let inputs = plotting_inputs();
+        let mut sample = TimelineSample::from_inputs(8, 42, &inputs);
+        assert_eq!(sample.measured_ns, 123);
+        assert_eq!(sample.temperatures_k, [Some(45.0), Some(15.0), None, None]);
+        assert_eq!(sample.measured_w, [Some(2.0), None]);
+        assert_eq!(sample.requested_w, Some(-0.25));
+        assert_eq!(sample.bridge_flow_w, Some(-0.25));
+        assert_eq!(sample.tracking_error_w, None);
+        assert_eq!(sample.inversion_delta_k, Some(-30.0));
+        assert_eq!(sample.body_k, Some(14.0));
+        assert_eq!(sample.change, inputs.a1_step_v1.unwrap().change);
+        sample.apply_control(&Event::Control {
+            at_ns: 123,
+            requested_w: Some(-0.25),
+            limited_w: Some(0.0),
+            measured_w: Some(1.75),
+            targets_w: Some([0.0, 0.0]),
+            equivalence: Some("limited"),
+            slew_limited: false,
+            power_limited: true,
+            current_limited: false,
+            warning: None,
+            fault: None,
+        });
+        assert_eq!(sample.limited_w, Some(0.0));
+        assert_eq!(sample.targets_w, Some([0.0, 0.0]));
+        assert_eq!(sample.equivalence.as_deref(), Some("limited"));
+        assert!(sample.power_limited);
+        assert_eq!(sample.measured_w, [Some(2.0), None]);
+        assert_eq!(sample.tracking_error_w, Some(2.0));
+        assert_eq!(sample.bridge_flow_w, Some(-0.25));
+
+        let mut inputs = inputs;
+        inputs.power[1].quality = Quality::Measured;
+        inputs.demand = raw::Demand::Power { requested_w: 3.5 };
+        let sample = TimelineSample::from_inputs(9, 45, &inputs);
+        assert_eq!(sample.tracking_error_w, Some(0.5));
+        assert_eq!(sample.bridge_flow_w, None);
+    }
+
+    fn plotting_inputs() -> Inputs<'static> {
+        let power = raw::PowerSample {
+            channel: Channel::A,
+            quality: Quality::Measured,
+            current_a: Some(0.5),
+            voltage_v: Some(4.0),
+            target_w: None,
+            read_started_ns: None,
+            read_finished_ns: None,
+        };
+        let temperatures = [
+            (ThermalPoint::Stage1, Quality::Measured, Some(45.0)),
+            (ThermalPoint::Stage2, Quality::Measured, Some(15.0)),
+            (ThermalPoint::Tf, Quality::Missing, None),
+            (ThermalPoint::Jacket, Quality::Invalid, Some(77.0)),
+        ];
+        Inputs {
+            scheduled_ns: 100,
+            measured_ns: 123,
+            wall_time_s: 0.0,
+            dt_ns: 100,
+            power: [
+                power,
+                raw::PowerSample {
+                    channel: Channel::B,
+                    quality: Quality::Invalid,
+                    ..power
+                },
+            ],
+            temperatures: temperatures.map(|(point, quality, temperature_k)| {
+                raw::TemperatureSample {
+                    point,
+                    channel: None,
+                    quality,
+                    temperature_k,
+                    read_started_ns: None,
+                    read_finished_ns: None,
+                }
+            }),
+            demand: raw::Demand::VirtualBody { requested_w: -0.25 },
+            source_connected: true,
+            thermometer_connected: true,
+            missed_tick: false,
+            allow_stale_once: false,
+            expect_tick: true,
+            queue_fault: false,
+            model_valid: true,
+            journal_ok: true,
+            cooling_phase: "cooling",
+            a1_step_v1: Some(raw::A1StepV1 {
+                interval_ns: 100,
+                heater_energy_j: [0.0; 2],
+                held_tf_k: 15.0,
+                held_tf_age_ns: 12,
+                body_temperature_k: 14.0,
+                change: Some(raw::A1ChangeV1 {
+                    scale: Some(0.5),
+                    bridge_w_per_k: None,
+                    dh_event_j: Some(1.0),
+                    temperature_before_k: 14.0,
+                    temperature_after_k: 14.0,
+                    mass_kg: None,
+                }),
+            }),
+        }
     }
 }
