@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="approved">
+<GraceChangePlan graceVersion="4.0" status="applied">
   <C-CVTL-M6-RECORDING>
     <IntentSummary>Реализовать утверждённую спецификацию RECORDING последовательно, начиная с базы 5a6374cb2fbd8bc97cdf7d7f7e2f52096b3916c3 и этого процессного коммита с одобренной спецификацией. Один владелец симуляционного контура принимает raw и выдаёт эффекты M5, один файловый поток пишет независимые кадры. Точка запуска — отдельный пример cvtl-sim m6_recording с локально поднятыми симуляторами, каталогом прогона и профилем test_only. Штатный запуск демона остаётся проверкой конфигурации. ADR 0003 задаёт данные, ADR 0008 — допуск и OFF. REPLAY, IMPORT, GUI, анализ, отчёт и экспорт в этом пакете не выполняются.</IntentSummary>
     <BaselineAssertions>
