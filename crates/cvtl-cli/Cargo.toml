@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+cvtl-analysis = { path = "../cvtl-analysis" }
 cvtl-core = { path = "../cvtl-core" }
 cvtl-envelope = { path = "../cvtl-envelope" }
 cvtl-materials = { path = "../cvtl-materials" }

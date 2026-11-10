@@ -68,6 +68,13 @@
         <M-CVTL-SAFETY />
       </Links>
     </M-CVTL-STORE>
+    <M-CVTL-ANALYSIS>
+      <Summary>Офлайн-импорт стационарных точек этапа I. Исторические колонки сопоставляются физическим ступеням, опубликованные и вычисленные мощности разделены, штатные опоры проецируются отдельно.</Summary>
+      <Path>crates/cvtl-analysis/src/lib.rs</Path>
+      <Links>
+        <M-CVTL-CORE />
+      </Links>
+    </M-CVTL-ANALYSIS>
     <M-CVTL-DAEMON>
       <Summary>Точка запуска валидирует конфигурацию и завершается.</Summary>
       <Path>crates/cvtl-daemon/src/main.rs</Path>
@@ -76,7 +83,7 @@
       </Links>
     </M-CVTL-DAEMON>
     <M-CVTL-CLI>
-      <Summary>Автономные команды wire и heater-advisor, офлайн-реплей RECORDING v1 с пересчётом M4/M5 по проверенным первичным данным.</Summary>
+      <Summary>Автономные расчёты wire и heater-advisor, офлайн-реплей RECORDING v1 и импорт исторических данных этапа I.</Summary>
       <Path>crates/cvtl-cli/src/main.rs</Path>
       <Links>
         <M-CVTL-CORE />
@@ -86,6 +93,7 @@
         <M-CVTL-CONTROL />
         <M-CVTL-SAFETY />
         <M-CVTL-STORE />
+        <M-CVTL-ANALYSIS />
       </Links>
     </M-CVTL-CLI>
   </GD-MAIN>

@@ -12,6 +12,7 @@
         <M-CVTL-INSTRUMENTS />
         <M-CVTL-SIM />
         <M-CVTL-STORE />
+        <M-CVTL-ANALYSIS />
         <M-CVTL-DAEMON />
         <M-CVTL-CLI />
       </Owns>

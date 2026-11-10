@@ -86,6 +86,14 @@
       </TestFiles>
       <TraceAssertion>Пакет принимается целиком. Поздний sync не снимает просрочку. При восстановлении выдаются только полные кадры с проверенной контрольной суммой и непрерывным seq.</TraceAssertion>
     </V-M-CVTL-STORE>
+    <V-M-CVTL-ANALYSIS>
+      <Command>cargo test --locked -p cvtl-analysis --test stage_i</Command>
+      <Scenario>Импорт фактической транскрипции ТЗ, проверка строк и проекция штатных опор.</Scenario>
+      <TestFiles>
+        <File>crates/cvtl-analysis/tests/stage_i.rs</File>
+      </TestFiles>
+      <TraceAssertion>Ступени сопоставляются явно, неизвестный ток остаётся неизвестным, производный CSV совпадает с опорами 1–6.</TraceAssertion>
+    </V-M-CVTL-ANALYSIS>
     <V-M-CVTL-DAEMON>
       <Command>cargo run --locked -p cvtl-daemon -- config/simulator.yaml</Command>
       <Scenario>Запуск с config/simulator.yaml.</Scenario>
@@ -95,9 +103,11 @@
       <Command>cargo test --locked -p cvtl-cli</Command>
       <Scenario>Команды wire и heater-advisor на тестовых входах.</Scenario>
       <Scenario>Офлайн-реплей файлового журнала, пересчёт M4/M5, проверка происхождения и неполного префикса.</Scenario>
+      <Scenario>Детерминированный импорт этапа I с происхождением и хэшем фактического источника.</Scenario>
       <TestFiles>
         <File>crates/cvtl-cli/tests/m2_cli.rs</File>
         <File>crates/cvtl-cli/tests/m6_replay.rs</File>
+        <File>crates/cvtl-cli/tests/m6_import.rs</File>
       </TestFiles>
       <TraceAssertion>Проверяются расчёт проводки, вывод области нагревателя и обработка отсутствующих данных.</TraceAssertion>
       <TraceAssertion>Повторный расчёт сравнивается с сохранёнными решениями. Ошибка кадра и неполный такт различаются, а состояние выхода требует причинно связанных ответов обеих ветвей.</TraceAssertion>

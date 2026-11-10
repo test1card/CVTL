@@ -51,11 +51,15 @@ dependencies = [
 [[package]]
 name = "cvtl-analysis"
 version = "0.1.0"
+dependencies = [
+ "cvtl-core",
+]
 
 [[package]]
 name = "cvtl-cli"
 version = "0.1.0"
 dependencies = [
+ "cvtl-analysis",
  "cvtl-control",
  "cvtl-core",
  "cvtl-envelope",
