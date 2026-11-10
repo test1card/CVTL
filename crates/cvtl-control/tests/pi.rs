@@ -138,3 +138,16 @@ fn quantization_never_returns_an_off_grid_ceiling() {
     assert!(out.current.get() <= cap);
     assert_eq!(out.current.get(), 0.2);
 }
+#[test]
+fn finite_high_demand_with_tiny_resistance_saturates_without_overflow() {
+    let mut c = config();
+    c.kp = 0.0;
+    c.ki = PerSecond::new(0.0).unwrap();
+    c.resistance_min = Ohms::new(1e-300).unwrap();
+    c.resistance_initial = c.resistance_min;
+    c.resistance_max = c.resistance_min;
+    let mut pi = Pi::new(c).unwrap();
+    let out = step(&mut pi, 1e100, sample(0.0, 0.0), 0.1, 0.35);
+    assert!(out.saturated);
+    assert!(out.current.get() <= 0.35);
+}

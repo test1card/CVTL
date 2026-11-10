@@ -184,7 +184,12 @@ impl Pi {
         if !power.is_finite() {
             return Err(PiError::Arithmetic);
         }
-        let raw = (power.max(0.0) / resistance).sqrt();
+        let saturated = power > max_power;
+        let raw = if saturated {
+            max_current.get()
+        } else {
+            (power.max(0.0) / resistance).sqrt().min(max_current.get())
+        };
         if !raw.is_finite() {
             return Err(PiError::Arithmetic);
         }
@@ -212,7 +217,7 @@ impl Pi {
             current: Amperes::new(current).ok_or(PiError::Arithmetic)?,
             measured_power: Some(Watts::new(p).ok_or(PiError::Arithmetic)?),
             resistance: Ohms::new(resistance).ok_or(PiError::Arithmetic)?,
-            saturated: raw > max_current.get(),
+            saturated,
         };
         self.resistance = resistance;
         self.integral = integral;

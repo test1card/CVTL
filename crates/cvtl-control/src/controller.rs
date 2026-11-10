@@ -79,6 +79,12 @@ pub enum Fault {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Warning {
+    /// A single stale tick held the previous safe command without PI updates.
+    MeasurementStale,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Equivalence {
     Inactive,
     Inhibited,
@@ -97,6 +103,7 @@ pub struct ControlOutput {
     pub action: Actuation,
     pub equivalence: Equivalence,
     pub fault: Option<Fault>,
+    pub warning: Option<Warning>,
     pub slew_limited: bool,
     pub power_limited: bool,
     pub current_limited: bool,
@@ -124,9 +131,10 @@ pub struct Controller {
     fault: Option<Fault>,
     mode: Option<ActiveMode>,
     previous_current: [Amperes; 2],
-    previous_target: Watts,
+    previous_targets: [Watts; 2],
     last_tick: Option<Seconds>,
     last_sample: [Option<Seconds>; 2],
+    stale_held: bool,
     temperature_integral: f64,
 }
 
@@ -140,6 +148,15 @@ fn zero_current() -> Amperes {
 
 fn power(current: Amperes, resistance: f64) -> f64 {
     current.get() * (current.get() * resistance)
+}
+
+fn upper_power(current: Amperes, resistance: f64) -> f64 {
+    let i = current.get();
+    if i == 0.0 {
+        0.0
+    } else {
+        (i * (i * resistance).next_up()).next_up()
+    }
 }
 
 impl Controller {
@@ -180,9 +197,10 @@ impl Controller {
             fault: None,
             mode: None,
             previous_current: [zero_current(); 2],
-            previous_target: zero_watts(),
+            previous_targets: [zero_watts(); 2],
             last_tick: None,
             last_sample: [None; 2],
+            stale_held: false,
             temperature_integral: 0.0,
         })
     }
@@ -210,15 +228,21 @@ impl Controller {
             return Ok(self.latch(Fault::Clock, requested, None));
         }
         self.last_tick = Some(tick.now);
-        let fresh = tick.measurements.iter().enumerate().all(|(i, sample)| {
+        let ordered = tick.measurements.iter().enumerate().all(|(i, sample)| {
             sample.is_some_and(|sample| {
-                self.is_fresh(sample.at, tick.now)
+                sample.at.get() >= 0.0
+                    && sample.at <= tick.now
                     && self.last_sample[i].is_none_or(|previous| previous <= sample.at)
             })
         });
-        let measured = fresh
-            .then(|| Self::total_measured(tick.measurements))
-            .flatten();
+        let fresh = ordered
+            && tick
+                .measurements
+                .iter()
+                .flatten()
+                .all(|s| self.is_fresh(s.at, tick.now));
+        let sample_power = Self::total_measured(tick.measurements);
+        let measured = fresh.then_some(sample_power).flatten();
         if self.fault.is_some() {
             return Ok(self.off(requested, measured, Equivalence::Fault));
         }
@@ -242,13 +266,40 @@ impl Controller {
             return Ok(self.latch(Fault::MeasurementUnavailable, requested, None));
         };
         let samples = [a, b];
-        if !fresh {
-            return Ok(self.latch(Fault::MeasurementStale, requested, None));
-        }
-        if measured.is_none() {
+        if sample_power.is_none() {
             return Ok(self.latch(Fault::MeasurementUnavailable, requested, None));
         }
+        if let Demand::TemperatureHold {
+            setpoint,
+            stage1,
+            stage2,
+            at,
+        } = tick.demand
+        {
+            if self.config.temperature_hold.is_none() || setpoint.get() <= 0.0 {
+                return Ok(self.off(requested, measured, Equivalence::Inhibited));
+            }
+            if !self.is_fresh(at, tick.now) || stage2.get() <= 0.0 || stage2 >= stage1 {
+                return Ok(self.latch(Fault::TemperatureInterlock, requested, measured));
+            }
+        }
+        if !fresh {
+            let max_age = self.config.max_sample_age.get();
+            let grace = max_age + dt.min(max_age);
+            let one_tick = ordered
+                && samples
+                    .iter()
+                    .all(|sample| tick.now.get() - sample.at.get() <= grace + 1e-9);
+            if self.mode.is_some() && !self.stale_held && one_tick {
+                return Ok(match self.hold_stale(tick, cap, requested) {
+                    Some(output) => output,
+                    None => self.latch(Fault::Calculation, requested, None),
+                });
+            }
+            return Ok(self.latch(Fault::MeasurementStale, requested, None));
+        }
         let mut next = self.clone();
+        next.stale_held = false;
         match next.drive(tick, cap, samples, measured) {
             Ok(output) => {
                 *self = next;
@@ -256,6 +307,69 @@ impl Controller {
             }
             Err(fault) => Ok(self.latch(fault, requested, measured)),
         }
+    }
+
+    fn hold_stale(
+        &mut self,
+        tick: Tick,
+        cap: f64,
+        requested: Option<Watts>,
+    ) -> Option<ControlOutput> {
+        if requested.is_some_and(|request| request.get() <= 0.0) {
+            let mut output = self.off(requested, None, Equivalence::Limited);
+            output.warning = Some(Warning::MeasurementStale);
+            output.power_limited = requested.is_some_and(|request| request.get() < 0.0);
+            return Some(output);
+        }
+        let ceilings = self.current_budgets(cap)?;
+        let currents = limit_currents(self.previous_current, ceilings);
+        if !self.commands_safe(currents, cap) {
+            return None;
+        }
+        let current_limited = currents != self.previous_current;
+        // Keep the rate limiter aligned with any immediate downward cut.
+        let held_caps = std::array::from_fn(|i| {
+            if currents[i] == self.previous_current[i] {
+                self.previous_targets[i]
+            } else {
+                Watts::new(
+                    power(currents[i], self.config.pi[i].resistance_min.get())
+                        .min(self.previous_targets[i].get()),
+                )
+                .expect("validated power bound")
+            }
+        });
+        let previous_target = self.previous_target();
+        let held = self
+            .allocator
+            .step(
+                previous_target,
+                held_caps,
+                Watts::new(cap)?,
+                [true; 2],
+                tick.dt,
+            )
+            .ok()?;
+        self.previous_current = currents;
+        self.previous_targets = held.targets;
+        self.stale_held = true;
+        Some(ControlOutput {
+            requested,
+            limited: held.limited,
+            measured: None,
+            targets: held.targets,
+            action: Actuation::Drive(currents),
+            equivalence: if current_limited || held.hard_limit {
+                Equivalence::Limited
+            } else {
+                Equivalence::Settling
+            },
+            fault: None,
+            warning: Some(Warning::MeasurementStale),
+            slew_limited: held.slew_limited,
+            power_limited: held.hard_limit,
+            current_limited,
+        })
     }
 
     fn drive(
@@ -277,7 +391,7 @@ impl Controller {
         });
         let transfer = self.mode.is_some_and(|previous| previous != mode);
         let reference = if transfer {
-            self.previous_target
+            self.previous_target()
         } else {
             request
         };
@@ -324,12 +438,22 @@ impl Controller {
             }
             self.last_sample[i] = Some(samples[i].at);
         }
+        let bounded = limit_currents(currents, ceilings);
+        for (i, current) in bounded.iter().copied().enumerate() {
+            if current != currents[i] {
+                current_limited = true;
+                self.pi[i]
+                    .rebase(allocation.targets[i], Some(samples[i].sample), current)
+                    .map_err(|_| Fault::Calculation)?;
+            }
+        }
+        let currents = bounded;
         if !self.commands_safe(currents, cap) {
             return Err(Fault::Calculation);
         }
         self.mode = Some(mode);
         self.previous_current = currents;
-        self.previous_target = allocation.limited;
+        self.previous_targets = allocation.targets;
         let measured = measured.ok_or(Fault::MeasurementUnavailable)?;
         let tolerance = (0.01 * request.get()).max(0.005);
         let tracking = (measured.get() - request.get()).abs() <= tolerance;
@@ -348,6 +472,7 @@ impl Controller {
             action: Actuation::Drive(currents),
             equivalence,
             fault: None,
+            warning: None,
             slew_limited: transfer || allocation.slew_limited,
             power_limited,
             current_limited,
@@ -360,22 +485,12 @@ impl Controller {
             Demand::PowerProfile(p) => Ok((ActiveMode::Profile, p)),
             Demand::VirtualBody(p) => Ok((ActiveMode::Virtual, p)),
             Demand::TemperatureHold {
-                setpoint,
-                stage1,
-                stage2,
-                at,
+                setpoint, stage2, ..
             } => {
                 let cfg = self
                     .config
                     .temperature_hold
                     .ok_or(Fault::TemperatureInterlock)?;
-                if !self.is_fresh(at, tick.now)
-                    || stage2.get() <= 0.0
-                    || setpoint.get() <= 0.0
-                    || stage2 >= stage1
-                {
-                    return Err(Fault::TemperatureInterlock);
-                }
                 let error = setpoint.get() - stage2.get();
                 let proportional = cfg.kp.get() * error;
                 let increment = cfg.ki.get() * error * tick.dt.get();
@@ -385,7 +500,7 @@ impl Controller {
                 let mode = ActiveMode::Temperature(setpoint);
                 if self.mode != Some(mode) {
                     self.temperature_integral =
-                        (self.previous_target.get() - proportional).clamp(-cap, cap);
+                        (self.previous_target().get() - proportional).clamp(-cap, cap);
                 } else {
                     let candidate = (self.temperature_integral + increment).clamp(-cap, cap);
                     let proposed = proportional + candidate;
@@ -407,7 +522,12 @@ impl Controller {
     fn is_fresh(&self, sample: Seconds, now: Seconds) -> bool {
         sample.get() >= 0.0
             && sample <= now
-            && now.get() - sample.get() <= self.config.max_sample_age.get()
+            && now.get() - sample.get() <= self.config.max_sample_age.get() + 1e-9
+    }
+
+    fn previous_target(&self) -> Watts {
+        Watts::new(self.previous_targets[0].get() + self.previous_targets[1].get())
+            .expect("validated target sum")
     }
 
     fn total_measured(samples: [Option<TimedPowerSample>; 2]) -> Option<Watts> {
@@ -425,7 +545,7 @@ impl Controller {
         let total = [0, 1]
             .into_iter()
             .map(|i| {
-                power(
+                upper_power(
                     self.source_currents[i],
                     self.config.pi[i].resistance_max.get(),
                 )
@@ -458,7 +578,8 @@ impl Controller {
         for (i, current) in currents.into_iter().enumerate() {
             let branch = self.config.branches[i];
             let (_, max) = branch.resistance.bounds();
-            let watts = power(current, max.get());
+            // Outward rounding protects the bound from different associations of I²R.
+            let watts = upper_power(current, max.get());
             if watts > branch.heater_limit.unwrap().get()
                 || !check_current(max, branch.loop_resistance, current, self.config.margins)
                     .unwrap_or(false)
@@ -467,7 +588,7 @@ impl Controller {
             }
             sum += watts;
         }
-        sum <= cap
+        sum == 0.0 || sum.next_up() <= cap
     }
 
     fn clear_output_history(&mut self) {
@@ -475,8 +596,9 @@ impl Controller {
         self.allocator.reset();
         self.mode = None;
         self.previous_current = [zero_current(); 2];
-        self.previous_target = zero_watts();
+        self.previous_targets = [zero_watts(); 2];
         self.temperature_integral = 0.0;
+        self.stale_held = false;
     }
 
     fn off(
@@ -494,6 +616,7 @@ impl Controller {
             action: Actuation::Off,
             equivalence,
             fault: self.fault,
+            warning: None,
             slew_limited: false,
             power_limited: false,
             current_limited: false,
@@ -506,9 +629,19 @@ impl Controller {
         requested: Option<Watts>,
         measured: Option<Watts>,
     ) -> ControlOutput {
-        self.fault = Some(fault);
+        self.fault.get_or_insert(fault);
         self.off(requested, measured, Equivalence::Fault)
     }
+}
+
+fn limit_currents(currents: [Amperes; 2], ceilings: [Amperes; 2]) -> [Amperes; 2] {
+    std::array::from_fn(|i| {
+        if currents[i] <= ceilings[i] {
+            currents[i]
+        } else {
+            ceilings[i]
+        }
+    })
 }
 
 fn quantized_ceiling(current: f64, step: Option<Amperes>) -> Option<Amperes> {

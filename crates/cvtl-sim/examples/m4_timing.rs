@@ -154,6 +154,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             if let Some(fault) = output.fault {
                 return Err(format!("controller fault: {fault:?}").into());
             }
+            if let Some(warning) = output.warning {
+                eprintln!("Предупреждение контроллера, такт {tick}: {warning:?}");
+            }
             let Actuation::Drive(currents) = output.action else {
                 return Err("controller did not drive".into());
             };

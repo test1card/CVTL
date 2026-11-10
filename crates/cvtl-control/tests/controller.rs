@@ -194,7 +194,9 @@ fn failures_stop_both_branches_and_do_not_resume_on_recovery() {
 
 #[test]
 fn temperature_hold_requires_permit_fresh_temperatures_and_no_inversion() {
-    let mut c = controller(fixture());
+    let mut cfg = fixture();
+    cfg.max_sample_age = s(0.05);
+    let mut c = controller(cfg);
     let hold = |at, stage1| Demand::TemperatureHold {
         setpoint: k(5.0),
         stage1: k(stage1),
@@ -213,9 +215,18 @@ fn temperature_hold_requires_permit_fresh_temperatures_and_no_inversion() {
         matches!(c.tick(tick(0.2, hold(0.2, 20.0), permit)).unwrap().action,
         Actuation::Drive(i) if i[0] > a(0.0))
     );
-    let out = c.tick(tick(0.3, hold(0.3, 3.0), permit)).unwrap();
+    let mut inversion = tick(0.3, hold(0.3, 3.0), permit);
+    inversion.measurements = samples(0.2, [a(0.0); 2], [10.0; 2]);
+    let out = c.tick(inversion).unwrap();
     assert_eq!(out.fault, Some(Fault::TemperatureInterlock));
     assert_eq!(out.action, Actuation::Off);
+    assert_eq!(out.warning, None);
+    assert_eq!(
+        c.tick(tick(0.4, Demand::Power(w(1.0)), permit))
+            .unwrap()
+            .fault,
+        out.fault
+    );
 }
 
 #[test]
@@ -287,7 +298,8 @@ fn one_hundred_thousand_final_commands_respect_source_heaters_and_total() {
                     check_current(r(actual_r[i]), branch.loop_resistance, current, margins)
                         .unwrap()
                 );
-                let worst = current.get() * (current.get() * max.get());
+                let i = current.get();
+                let worst = (i * (i * max.get())).max((i * i) * max.get());
                 assert!(worst <= branch.heater_limit.unwrap().get(), "case {case}");
                 worst_total += worst;
                 if let Some(q) = quantum {
