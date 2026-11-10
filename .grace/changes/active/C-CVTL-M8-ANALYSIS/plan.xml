@@ -1,0 +1,86 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M8-ANALYSIS>
+    <IntentSummary>Рассчитать производные, Q2_eff и неопределённость по проверенным интервалам A1 на базе 02a13f2. Один численный тракт для CLI и GUI. Эталонные уровни проверяются отдельным прогоном генератора на loopback. Исполнение после отдельного утверждения плана и baseline.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist><Value>.grace/changes/archive/C-CVTL-M7-GUI/plan.xml</Value><Value>M-CVTL-ANALYSIS</Value><Value>M-CVTL-CLI</Value><Value>M-CVTL-SIM</Value><Value>M-CVTL-DAEMON</Value><Value>M-CVTL-GUI</Value></MustExist>
+      <MustNotExist><Value>crates/cvtl-analysis/src/m8.rs</Value><Value>crates/cvtl-cli/src/analysis.rs</Value></MustNotExist>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist><Value>crates/cvtl-analysis/src/m8.rs</Value><Value>crates/cvtl-analysis/tests/m8.rs</Value><Value>crates/cvtl-cli/src/analysis.rs</Value><Value>crates/cvtl-cli/examples/m8_a1_calibration.rs</Value><Value>docs/M8_ANALYSIS.md</Value></MustExist>
+      <MustLink><From>M-CVTL-ANALYSIS</From><To>M-CVTL-PHYSICS</To></MustLink>
+      <MustVerify><Module>M-CVTL-ANALYSIS</Module><Module>M-CVTL-CLI</Module><Module>M-CVTL-SIM</Module><Module>M-CVTL-DAEMON</Module><Module>M-CVTL-GUI</Module></MustVerify>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="3">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="38">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-ANALYSIS /><M-CVTL-CLI /><M-CVTL-SIM /><M-CVTL-DAEMON /><M-CVTL-GUI /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-ANALYSIS /><V-M-CVTL-CLI /><V-M-CVTL-SIM /><V-M-CVTL-DAEMON /><V-M-CVTL-GUI /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.lock</File>
+      <File>crates/cvtl-analysis/Cargo.toml</File>
+      <File>crates/cvtl-analysis/src/lib.rs</File>
+      <File>crates/cvtl-analysis/src/m8.rs</File>
+      <File>crates/cvtl-analysis/src/m8/window.rs</File>
+      <File>crates/cvtl-analysis/src/m8/uncertainty.rs</File>
+      <File>crates/cvtl-analysis/tests/m8.rs</File>
+      <File>crates/cvtl-physics/src/scenario.rs</File>
+      <File>crates/cvtl-sim/src/a1.rs</File>
+      <File>crates/cvtl-sim/src/recording.rs</File>
+      <File>crates/cvtl-cli/src/lib.rs</File>
+      <File>crates/cvtl-cli/src/main.rs</File>
+      <File>crates/cvtl-cli/src/replay.rs</File>
+      <File>crates/cvtl-cli/src/replay/a1.rs</File>
+      <File>crates/cvtl-cli/src/replay/profile.rs</File>
+      <File>crates/cvtl-cli/src/analysis.rs</File>
+      <File>crates/cvtl-cli/examples/m8_a1_calibration.rs</File>
+      <File>crates/cvtl-cli/tests/m8_analysis.rs</File>
+      <File>crates/cvtl-daemon/src/archive.rs</File>
+      <File>ui/operator/types.ts</File>
+      <File>ui/operator/Review.svelte</File>
+      <File>ui/scripts/operator-test.mjs</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/M8_ANALYSIS.md</File>
+      <File>docs/STATUS.md</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Численный баланс, производные и неопределённость</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала аналитические тесты. Для stage2+tf использовать Q2=[Σ(EA+EB+dt·[G12(T1prev−T2prev)+Qwire+Qother])−C2ΔT2−CfΔTf]/W, W=Σdt. Левый отсчёт соответствует явному шагу головы, внутренний Gf2 сокращается. Источники и температуры остаются знаковыми. Для явно применённой проводки постоянного сечения с нулевым током использовать существующий проводниковый Bridge и архивный k(T). Оценивать термометрию на фактических границах модели. В отчёте указать диапазон, средние условия stage1, stage2, tf, jacket, тепловой профиль и число интервалов.</Criterion>
+          <Criterion>По умолчанию окно 12 с до последней границы, можно задать start от первого модельного интервала и окно от 10 до 30 с. Выбрать полностью заключённые шаги с предыдущим пригодным концом. Покрытие каждого края не хуже 0,5 с, минимум пять точек, внутренний шаг не больше 0,5 с, времена непрерывны и возрастают. Разрывы и непригодные точки внутри окна дают «не определяется». Локальный квадратичный полином на этих точках центрируется в середине фактического окна и масштабируется по его половине. Для производной остаток линейного столбца после проекции на 1 и x² даёт веса. Вырожденная проекция отклоняется. Отдельно проверить request(FixtureCompensation) с оценённой dTf/dt и действующей формулой.</Criterion>
+          <Criterion>Для synthetic test_only заранее задать независимые равномерные относительные полуширины массы 1 %, cp 1,5 %, G12 2 %, коэффициента энергии 0,5 %, длины применённой проводки 2 %. Смещение 0,002 К на канал и шум 0,0005 К на отсчёт. C=C0(1+δmass)(1+δcp). В аналитике объединить веса всех использований одного отсчёта и отдельно учесть общую сумму весов каждого смещения. Для проводника учесть k на концах и dQ/dL=−Q/L. Monte Carlo 4096 draws SplitMix64, seed по умолчанию 20261111, квантиль линейно между соседями p·(N−1). Одна реализация температуры на канал и отсчёт для баланса и производных. Проверить знаки, точный наклон нерегулярной квадратичной сетки, аффинный эталон Q=4±0,2 с σ=0,2/√3 и 5/50/95=3,82/4/4,18 Вт, MC допуск 0,02 Вт и точный повтор по seed.</Criterion>
+          <Criterion>Неизвестный постоянный приток и Q2 неразличимы, вернуть причину и null. При явном парном запросе оценить неизвестную Cf при известной C2, общей заявленной синтетической группе и отличающейся фактической мощности. Для каждого окна y=E/W+G12ΔT12+Qwire+Qother−C2ΔT2/W, s=ΔTf/W, Cf=(y2−y1)/(s2−s1), Q2=y1−Cf·s1. Требовать разность мощностей не меньше 0,05 Вт, разность наклонов больше 3 объединённых σ и 1e-6 К/с, положительную Cf. Аналитическое распространение и MC парного результата используют те же реализации примитивов. При доле непригодных MC реализаций более 1 % результат не определяется, меньшая доля отражается в отчёте. Проверить точный парный эталон 4 Вт и 5 Дж/К, одинаковые наклоны, смешанный приток и условия отказа.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-analysis --test m8</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Вход из реплея и калибровочные прогоны</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала тесты совместимости и входа. Реплей проецирует модельные интервалы только после успешного apply. Конец уже восстанавливается из предыдущего удержанного tf и возраста, начало получается вычитанием interval_ns. Энергия ветвей берётся из A1StepV1. Учитывать четыре канонических KRDG и качество с отметками в порядке конца интервала, начала, конца чтения и измеренного момента. Первое полностью пригодное окно использует предыдущий конец, пропуски и отказ остаются разрывом. Анализ использует максимум 5000 интервалов и лимит 32 МиБ сжатого raw. При превышении вернуть явный статус, окно GUI 240 не используется в численном расчёте.</Criterion>
+          <Criterion>Читать head_temperature_k, head_capacity_j_per_k, head_links_w_per_k и jacket_k из проверенного снимка в ветке анализа. Совместимые A1 v1/v2 без поля m8 имеют известный нулевой внешний холодный приток и обычную голову. Необязательное поле m8 хранит известный или неизмеренный иной приток, явно применённый проводник и нейтральную группу эксперимента. Проводник строится через выделенный общий BridgeSetup::build с проверенными байтами nist_csv. GUI-диагностика проводки не подставляется. Совпадение архива требует полного совпавшего реплея, OFF, границы кадра, raw seq и квитанции completed.json. CLI читает ту же грамматику receipt, демон передаёт уже проверяемый receipt. Один проход реплея на запрос, прежние CLI JSON и коды возврата остаются прежними.</Criterion>
+          <Criterion>Добавить команду analyze КАТАЛОГ с опциями --start SECONDS, --window SECONDS, --seed N и --pair КАТАЛОГ. Использовать один библиотечный расчёт с параметрами по умолчанию для GUI. Парный запрос принимает два разных завершённых архива с одной непустой заявленной группой, совпадающими моделью границы, C2 и исходными условиями. Cf из снимка не участвует в идентификации. В отчёте показать сравниваемые мощности и отклики, оценки, интервал и причины недоступности. Для неподдержанного или недостаточного прогона статус JSON «не определяется». Целостность и обработка исторического v1 проверяются отдельно.</Criterion>
+          <Criterion>Отдельный test_only конструктор A1 задаёт физический холодный отвод и скрытый фактически приложенный иной приток только у генератора. Действующие конструкторы и прогноз сохраняют 2/4 Вт. Пример m8_a1_calibration пишет четыре каталога по 300 тактов с расписанием 100 мс и квитанциями только после OffVerified+Completed. Два номинала 3 и 5 Вт, пара к первому имеет тот же отвод 3 Вт при большей тепловой нагрузке. Для двух членов пары применить одинаковый OFHC проводник A=1e-7 м², L=0,20 м. Первая нагрузка G=0,02→0,04 Вт/К на такте 50, вторая G=0,20 Вт/К. Неизмеренный пример фактически использует 5 Вт отвода и 1 Вт притока, в архиве только маркер неизвестности. У всех 20 кг, 30 К, scale=0,1, тёплый отвод 2 Вт, неизменённые ограничения M5. Имена нейтральны, истина остаётся в отдельном файле эталонов.</Criterion>
+          <Criterion>Контрольное окно 8–20 с относительно модельного старта и seed 20261111. Проверить включение обоих известных уровней в 5–95 %, Cf=5 Дж/К и Q2=3 Вт в интервалах пары, отдельный ответ «не определяется» для скрытого притока. Сверить хэши снимка, raw и справочников до и после анализа, два запуска CLI побайтно. Сравнить оба старых отчёта v1. Длинный генератор запускается отдельной командой за пределами бюджета cargo test.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-cli --test m8_analysis</Command><Command>cargo test --locked -p cvtl-cli --test m7_a1_replay</Command><Command>cargo run --release --locked -p cvtl-cli --example m8_a1_calibration</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Разбор, свидетельства и приёмка</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Демон отдаёт в существующем Review результат M8 тем же путём проверенного чтения. Интерфейс показывает условия, Q2_eff, 5–95 %, производные с погрешностями и причину недоступности. Браузерный тест проверяет численный результат длинного штатного прогона и статус короткого прогона, а также прежние сценарии M7. Тест сравнивает ответ GUI с CLI для того же каталога и параметров. Сохранить структурированные результаты, условия синтетики и команды в docs и логи вне Git.</Criterion>
+          <Criterion>На чистой базе три прогретых прогона дали максимумы fmt 0,27 с и test 9,15 с, бюджеты ceil(4 × максимум) + 1. Выполнить baseline до исполнения, target и final после. Полный набор Rust и браузерный M7/M8 прогон на macOS и Ubuntu 22.04 в loopback-only окружении. Точная область и итоговое staged дерево проходят независимое ревью Astra с гейтом простоты и отдельным APPLY. Параметры и физическая сверка остаются test_only до проверки владельцем.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo fmt --all -- --check</Command><Command>cargo build --workspace --locked</Command><Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command><Command>cargo test --workspace --locked</Command><Command>npm --prefix ui run build:operator</Command><Command>npm --prefix ui run test:operator</Command></Verification>
+      </T-003>
+    </ImplementationPlan>
+  </C-CVTL-M8-ANALYSIS>
+</GraceChangePlan>
