@@ -1,0 +1,108 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M7-GUI>
+    <IntentSummary>Пять рабочих экранов на базе 73933997c40b006bac3399b402d6f3e1aaabde0d. Выпускной интерфейс раздаёт cvtl-daemon по IPv4 loopback. Один владелец A1 и M5, принятые события для живого экрана, проверенный реплей для истории. Исполнение начинается после отдельного утверждения плана и baseline.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist><Value>.grace/changes/archive/C-CVTL-M7-A1-SCENARIO/plan.xml</Value><Value>M-CVTL-DAEMON</Value><Value>M-CVTL-SIM</Value><Value>M-CVTL-STORE</Value><Value>M-CVTL-CLI</Value><Value>ui/vite.config.js</Value></MustExist>
+      <MustNotExist><Value>M-CVTL-GUI</Value><Value>ui/operator/main.ts</Value><Value>crates/cvtl-daemon/src/operator.rs</Value></MustNotExist>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist><Value>M-CVTL-GUI</Value><Value>ui/operator/main.ts</Value><Value>ui/scripts/operator-test.mjs</Value><Value>crates/cvtl-daemon/tests/operator_http.rs</Value><Value>docs/M7_GUI.md</Value><Value>docs/m7/scenario.png</Value><Value>docs/m7/preflight.png</Value><Value>docs/m7/live.png</Value><Value>docs/m7/replay.png</Value><Value>docs/m7/settings.png</Value></MustExist>
+      <MustLink><From>M-CVTL-GUI</From><To>M-CVTL-DAEMON</To></MustLink>
+      <MustLink><From>M-CVTL-DAEMON</From><To>M-CVTL-SIM</To></MustLink>
+      <MustVerify><Module>M-CVTL-DAEMON</Module><Module>M-CVTL-GUI</Module><Module>M-CVTL-SIM</Module><Module>M-CVTL-STORE</Module><Module>M-CVTL-CLI</Module></MustVerify>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="2">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="34">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-DAEMON /><M-CVTL-GUI /><M-CVTL-SIM /><M-CVTL-STORE /><M-CVTL-CLI /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-DAEMON /><V-M-CVTL-GUI /><V-M-CVTL-SIM /><V-M-CVTL-STORE /><V-M-CVTL-CLI /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.lock</File>
+      <File>crates/cvtl-daemon/Cargo.toml</File>
+      <File>crates/cvtl-daemon/src/main.rs</File>
+      <File>crates/cvtl-daemon/src/http.rs</File>
+      <File>crates/cvtl-daemon/src/operator.rs</File>
+      <File>crates/cvtl-daemon/src/scenario.rs</File>
+      <File>crates/cvtl-daemon/src/archive.rs</File>
+      <File>crates/cvtl-daemon/tests/operator_http.rs</File>
+      <File>crates/cvtl-cli/src/lib.rs</File>
+      <File>crates/cvtl-cli/src/main.rs</File>
+      <File>crates/cvtl-cli/src/replay.rs</File>
+      <File>crates/cvtl-sim/src/a1.rs</File>
+      <File>crates/cvtl-sim/src/recording.rs</File>
+      <File>crates/cvtl-sim/src/keithley.rs</File>
+      <File>crates/cvtl-store/src/session.rs</File>
+      <File>ui/package.json</File>
+      <File>ui/vite.operator.config.ts</File>
+      <File>ui/operator/index.html</File>
+      <File>ui/operator/main.ts</File>
+      <File>ui/operator/App.svelte</File>
+      <File>ui/operator/Scenario.svelte</File>
+      <File>ui/operator/Live.svelte</File>
+      <File>ui/operator/Review.svelte</File>
+      <File>ui/operator/Plot.svelte</File>
+      <File>ui/operator/types.ts</File>
+      <File>ui/operator/app.css</File>
+      <File>ui/scripts/operator-test.mjs</File>
+      <File>.github/workflows/ci.yml</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/adr/0001-gui.md</File>
+      <File>docs/M7_GUI.md</File>
+      <File>docs/STATUS.md</File>
+      <File>docs/m7/scenario.png</File>
+      <File>docs/m7/preflight.png</File>
+      <File>docs/m7/live.png</File>
+      <File>docs/m7/replay.png</File>
+      <File>docs/m7/settings.png</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Данные принятого такта и прогноз сценария</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала тесты. Добавить в Session необязательный синхронный наблюдатель только успешно принятых событий с Receipt. RecordingLoop даёт установить его до начала прогона. Только операторский демон подписывается на Inputs, Control, Observation, Operator и OutputEvidence. Сохраняются прежняя запись, очередь, допуск ON и Drive, сроки и схема raw. Callback фильтрует данные в памяти и не выполняет I/O или сетевое ожидание.</Criterion>
+          <Criterion>Один прогноз на действующем A1Scenario с общим тепловым шагом Body и SyntheticHead. Выдавать начальную точку и 30 шагов по 100 мс. Знаковый поток моста сохраняется, идеальный нагрев ограничивается нулём снизу и доступной номинальной мощностью сверху. Для 20 кг OFHC при 30 К, scale 0,1 и G 0,02 Вт/К первый шаг даёт 0,28 Вт, 44,965 К на stage1, 14,99 К на stage2 и 15,9956 К на tf с допуском 1e-9. Прогноз помечается как синтетический, с идеальным нагревом в расчётной области.</Criterion>
+          <Criterion>Сценарий принимает BodySetup и диагностические участки проводки и детали насадки. Показывать вклад проводки при нулевом токе по wire::solve со знаком на каждом конце и числом жил, и C насадки из fixture_heat_capacity. Интерфейс объясняет режим AdditionalLoad и отдельно показывает диагностические расчёты. Исходные температуры и коэффициенты берутся из того же профиля A1. Номинальная область вычисляется advise_pair по ControlConfig. Отдельно показать ограничения эмулятора, нагрузку из его состояния и фактические пороги M5. Сопротивление по измерениям доступно лишь при пригодных ненулевых I/V. Ни одно число профиля M5 не меняется.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-daemon</Command><Command>cargo test --locked -p cvtl-sim --test a1_loop</Command><Command>cargo test --locked -p cvtl-store</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Демон, локальный HTTP и завершённые записи</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала тесты HTTP. Сохранить проверку YAML позиционным аргументом. Добавить serve --assets КАТАЛОГ --runs КАТАЛОГ --port ЧИСЛО с привязкой только к 127.0.0.1 и динамическим портом при 0. Единственная новая внешняя Rust-зависимость httparse 1.10.1 разбирает заголовки. Один HTTP/1.1 запрос на соединение, заголовок до 8 КиБ и 32 полей, тело до 64 КиБ, абсолютный бюджет 250 мс чтения и 250 мс записи. Отклонять чужой Host, неоднозначное framing и передачу кодированного тела. POST требует точный Origin и application/json, без CORS. Статические ресурсы ограничены index и файлом из assets с безопасным именем. Сеть и пути к файлам приборов отсутствуют в теле запроса.</Criterion>
+          <Criterion>Один поток владеет RecordingLoop и эмуляторами. HTTP возвращает принятие в очередь, операторский результат публикуется по ID. Один обычный слот и отдельный слот Stop под короткой блокировкой. Stop атомарно снимает ожидающее обычное действие того же прогона. Повторить проверку идентификатора и срока 500 мс перед исполнением. Приоритет OFF проверяется на ближайшей границе операций, текущий обмен остаётся ограничен действующими сроками приборных вызовов. Завершить через begin_close и poll_close, отображать подтверждение выхода отдельно от статуса записи. Poll writer выполняется между действиями. Чтение архива и прогноз используют один отдельный рабочий поток с одним ожидающим запросом. HTTP и владелец контура не ждут тяжёлые расчёты.</Criterion>
+          <Criterion>Предпусковая готовность следует из writer.ready, текущего OutputOffVerified, принятого свежего наблюдения без faults, доступных расчётов и действующих ограничений. Arm, Start, Reset, Recover и Stop используют текущий путь M5. Start и Reset принимаются только с явным подтверждением, после перезапуска процесса и повторного подключения страницы действия не воспроизводятся автоматически. Шаг с принятой Inputs.change публикует ID тика и seq. Вычисленный Control сам по себе не служит доказательством ON. История владельца содержит до 240 тактов и 64 событий. Пропуски измерений остаются null. Известная причина ограничения берётся из Control и Observation.</Criterion>
+          <Criterion>Из существующего cvtl-cli выделить библиотечный вход реплея и сохранить байты CLI-отчёта и код выхода. Точки истории накапливаются только после успешного Replay::apply и ограничиваются 240 последними тактами. Показывать номер последнего сверенного события, пропущенный ранний диапазон и статус хвоста. Успешное закрытие writer даёт квитанцию generation и last_seq. Демон сохраняет её отдельным атомарно заменяемым файлом с подтверждённым состоянием выхода и диагностическими параметрами сценария. Список завершённых прогонов использует безопасные локальные ID. При разборе сверять ID, поколение, число проверенных записей и хвост, максимум 32 МиБ сжатого raw на один запрос. CLI-отчёт сохраняет собственный historical_completion. Квитанция и доказательство OFF отображаются раздельно. Сохранять исходные файлы записи.</Criterion>
+          <Criterion>Проверить штатную последовательность и чужой Origin, неверный Host, большой или медленно присылаемый запрос, истёкшее и чужое действие, Stop при занятом обычном слоте, завершение и выбор двух записей. Запросы без подтверждения отклоняются. Fault fixture доступен только при явном тестовом флаге запуска и использует одну существующую инъекцию потери чтения эмулятора. Проверить Unknown, явный Recover с подтверждённым OFF и Reset без пуска. Архивы v1 обоих видов дают прежние байты отчёта.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-daemon --test operator_http</Command><Command>cargo test --locked -p cvtl-cli --test m6_replay</Command><Command>cargo test --locked -p cvtl-cli --test m7_a1_replay</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Пять экранов и браузерная приёмка</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Отдельная сборка Vite в ui/dist/operator. Svelte, TypeScript, SVG и uPlot из имеющегося lock. Сохранить команды M0. Все пять экранов доступны из навигации. Постоянная маркировка симуляции, русские названия, единицы, подсказки, светлая и тёмная темы. Цветовые ряды различаются стилем линий, критические состояния имеют знак и текст. Видимый клавиатурный фокус, подписи полей, подтверждение и отмена с клавиатуры, компоновки 360 и 1280 CSS px. Настроить только выпускную сборку uPlot на безопасное форматирование ru-RU в месте инициализации NumberFormat и проверить подстановку navigator.language en-US@posix в тесте.</Criterion>
+          <Criterion>Сценарий показывает редактируемые начальные значения, четыре моста, проводку, насадку и краткий прогноз. Предпусковая проверка выводит факты и активирует допуск только в готовом тестовом состоянии. Живой экран показывает SVG, состояние обеих ветвей, stage1, stage2, tf, тело, мощность по ветвям и суммарно, знак потока, ошибку и причины ограничений. Зона инверсии отображает разность stage2 минус stage1 и пороги действующего профиля. Одно обновление сети за раз, прошлый снимок при потере связи помечается устаревшим. Разбор показывает проверенные данные, статус и сравнение двух закрытых записей. Для Q2_eff и неопределённости выводится статус доступности M8.</Criterion>
+          <Criterion>Playwright запускает реальный бинарник на выделенном localhost-порту и проверяет отсутствие запросов страницы вне origin. Номинальный 20 кг прогон допускается и запускается с подтверждением. В ходе теста меняются масса, scale и постоянный G. Принятие и применение различаются по seq. Длительный прогон достигает минимум 250 тактов при буфере до 240. Проверить диаграмму, минимум два температурных ряда и динамику, остановку, квитанцию, реплей, сравнение двух прогонов, сценарий отказа, сброс и повторное подключение страницы. Тест записывает фактическое время Stop до подтверждения. Сохранить снимки пяти экранов и команды воспроизведения.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>npm --prefix ui run build:operator</Command><Command>npm --prefix ui run test:operator</Command><Command>npm --prefix ui run build</Command><Command>npm --prefix ui test</Command></Verification>
+      </T-003>
+      <T-004>
+        <Title>Полная локальная проверка и Ubuntu 22.04</Title>
+        <DependsOn>T-003</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>В CI Ubuntu 22.04 добавить сборку Rust-демона и браузерный тест рабочего M7, сохранив проверку M0. До применения воспроизвести Rust-проверки, сборку и браузерный тест на Ubuntu 22.04 с Node 22 на локальной изолированной машине или гостевой ОС. В период тестирования доступны только локальные эмуляторы. Опубликовать точную версию системы, архитектуру, команды, журнал и отличия от локального macOS-прогона в STATUS и docs/M7_GUI.md. Аппаратный допуск остаётся закрытым.</Criterion>
+          <Criterion>На фактической базе три прогретых прогона после cargo test --workspace --locked --no-run дали максимум fmt 0,24 с и тестов 8,08 с. Бюджеты целевых команд равны ceil(4 × максимум) + 1 с. Перед исполнением выполнить baseline, после target и final. Новый npm-тест измеряется отдельным фактическим прогоном. Независимая Astra проверяет точное staged дерево, подтверждает простоту и отдельно разрешает APPLY. Каждый коммит проходит ревью.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo fmt --all -- --check</Command><Command>cargo build --workspace --locked</Command><Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command><Command>cargo test --workspace --locked</Command><Command>cargo run --locked -p cvtl-daemon -- config/simulator.yaml</Command><Command>npm --prefix ui run test:operator</Command></Verification>
+      </T-004>
+    </ImplementationPlan>
+  </C-CVTL-M7-GUI>
+</GraceChangePlan>
