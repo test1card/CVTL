@@ -94,10 +94,13 @@
     <V-M-CVTL-CLI>
       <Command>cargo test --locked -p cvtl-cli</Command>
       <Scenario>Команды wire и heater-advisor на тестовых входах.</Scenario>
+      <Scenario>Офлайн-реплей файлового журнала, пересчёт M4/M5, проверка происхождения и неполного префикса.</Scenario>
       <TestFiles>
         <File>crates/cvtl-cli/tests/m2_cli.rs</File>
+        <File>crates/cvtl-cli/tests/m6_replay.rs</File>
       </TestFiles>
       <TraceAssertion>Проверяются расчёт проводки, вывод области нагревателя и обработка отсутствующих данных.</TraceAssertion>
+      <TraceAssertion>Повторный расчёт сравнивается с сохранёнными решениями. Ошибка кадра и неполный такт различаются, а состояние выхода требует причинно связанных ответов обеих ветвей.</TraceAssertion>
     </V-M-CVTL-CLI>
   </VD-MAIN>
 </GraceVerificationDocument>

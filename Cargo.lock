@@ -56,12 +56,19 @@ version = "0.1.0"
 name = "cvtl-cli"
 version = "0.1.0"
 dependencies = [
+ "cvtl-control",
  "cvtl-core",
  "cvtl-envelope",
  "cvtl-materials",
  "cvtl-physics",
+ "cvtl-safety",
+ "cvtl-sim",
+ "cvtl-store",
  "serde",
+ "serde_json",
+ "sha2",
  "yaml_serde",
+ "zstd",
 ]
 
 [[package]]
