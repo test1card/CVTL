@@ -1,0 +1,26 @@
+{
+  "name": "cvtl-gui-m0",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/test.mjs"
+  },
+  "dependencies": {
+    "echarts": "6.0.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "svelte": "5.57.3",
+    "uplot": "1.6.32"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "5.1.1",
+    "@vitejs/plugin-react": "4.7.0",
+    "playwright": "1.56.1",
+    "vite": "6.4.1"
+  }
+}

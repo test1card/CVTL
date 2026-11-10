@@ -1,0 +1,10 @@
+/target/
+/ui/test-results/
+/ui/playwright-report/
+/runs/
+/.local/
+/.env
+/.env.*
+/.DS_Store
+/CVTL_TZ_overview.docx
+/DOCX_TASK.md

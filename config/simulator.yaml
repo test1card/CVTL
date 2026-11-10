@@ -1,0 +1,21 @@
+schema_version: 1
+hardware_enabled: false
+run_permission: unapproved
+thermometry:
+  transport: gpib_existing_adapter
+  channels: {stage2: null, tf: null, stage1: null, jacket: null}
+sources:
+  keithley:
+    resource: null
+    channels:
+      A: {heater_id: null, heater_limit_w: null, enabled_for_run: false, k_v: 0.9, k_i: 0.9}
+      B: {heater_id: null, heater_limit_w: null, enabled_for_run: false, k_v: 0.9, k_i: 0.9}
+  maisheng_1: {protocol_verified: false, enabled_for_run: false}
+  maisheng_2: {protocol_verified: false, enabled_for_run: false}
+safety:
+  head_envelope: null
+  total_power_limit_w: null
+  slew_up_w_per_s: null
+  slew_down_w_per_s: null
+  age_max_s: null
+  independent_cutoff_verified: false

@@ -1,0 +1,65 @@
+:root {
+  font:
+    16px system-ui,
+    sans-serif;
+  color: #172e3d;
+  background: #edf3f5;
+}
+body {
+  margin: 0;
+}
+main {
+  max-width: 900px;
+  margin: auto;
+  padding: 20px;
+}
+header,
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1em;
+}
+header span {
+  color: #126241;
+}
+h1 {
+  margin-bottom: 0;
+}
+p {
+  color: #435a68;
+}
+section {
+  background: white;
+  border: 1px solid #c9d7df;
+  border-radius: 12px;
+  padding: 20px;
+  margin: 20px 0;
+}
+h2 {
+  font-size: 1.2rem;
+}
+svg {
+  width: min(100%, 470px);
+}
+svg text {
+  font-size: 16px;
+  fill: #172e3d;
+}
+.plot {
+  overflow: auto;
+}
+button {
+  background: #fff;
+  border: 1px solid #416377;
+  border-radius: 5px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+button[aria-pressed="true"] {
+  background: #005f86;
+  color: #fff;
+}
+button:focus-visible {
+  outline: 3px solid #d98800;
+}
