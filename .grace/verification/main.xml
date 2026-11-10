@@ -1,0 +1,95 @@
+<GraceVerificationDocument graceVersion="4.0">
+  <VD-MAIN>
+    <V-M-CVTL-CORE>
+      <Command>cargo test --locked -p cvtl-core</Command>
+      <Scenario>Проверка конфигураций поставки и отклонение неверных настроек.</Scenario>
+      <TestFiles>
+        <File>crates/cvtl-core/src/lib.rs</File>
+      </TestFiles>
+      <TraceAssertion>Поставляемые конфиги отключают аппаратуру, попытка аппаратного запуска отклоняется.</TraceAssertion>
+    </V-M-CVTL-CORE>
+    <V-M-CVTL-MATERIALS>
+      <Command>cargo test --locked -p cvtl-materials</Command>
+      <Scenario>Табличные свойства, границы диапазонов и опорные значения.</Scenario>
+      <TestFiles>
+        <File>crates/cvtl-materials/tests/curves.rs</File>
+        <File>crates/cvtl-materials/tests/lakeshore_wire.rs</File>
+      </TestFiles>
+      <TraceAssertion>Интерполяция и интегрирование сверяются с эталонами и опорными точками источников.</TraceAssertion>
+    </V-M-CVTL-MATERIALS>
+    <V-M-CVTL-PHYSICS>
+      <Command>cargo test --locked -p cvtl-physics</Command>
+      <Scenario>Остывание одноузлового тела, тепловые мосты и потоки по проводке.</Scenario>
+      <TestFiles>
+        <File>crates/cvtl-physics/tests/physical_references.rs</File>
+        <File>crates/cvtl-physics/tests/wire_references.rs</File>
+      </TestFiles>
+      <TraceAssertion>Аналитические эталоны проверяют потоки и энергобаланс, включая dH_event.</TraceAssertion>
+    </V-M-CVTL-PHYSICS>
+    <V-M-CVTL-ENVELOPE>
+      <Command>cargo test --locked -p cvtl-envelope</Command>
+      <Scenario>Номинальные режимы источника, запас и предельное сопротивление.</Scenario>
+      <TestFiles>
+        <File>crates/cvtl-envelope/tests/analytic.rs</File>
+      </TestFiles>
+      <TraceAssertion>Номинальная таблица §7 ТЗ проверяется с запасом и без него.</TraceAssertion>
+    </V-M-CVTL-ENVELOPE>
+    <V-M-CVTL-CONTROL>
+      <Command>cargo test --locked -p cvtl-control</Command>
+      <Scenario>Смена уставки, насыщение, просроченный отсчёт и потеря ветви.</Scenario>
+      <TestFiles>
+        <File>crates/cvtl-control/tests/controller.rs</File>
+        <File>crates/cvtl-control/tests/limits_and_warnings.rs</File>
+      </TestFiles>
+      <TraceAssertion>Штатное насыщение и допустимая просрочка отличимы от защёлкнутого отказа.</TraceAssertion>
+    </V-M-CVTL-CONTROL>
+    <V-M-CVTL-SAFETY>
+      <Command>cargo test --locked -p cvtl-safety</Command>
+      <Scenario>Допуск, потеря связи, отказ журнала и сброс после подтверждения OFF.</Scenario>
+      <TestFiles>
+        <File>crates/cvtl-safety/tests/machine.rs</File>
+        <File>crates/cvtl-safety/tests/monitor.rs</File>
+        <File>crates/cvtl-safety/tests/supervisor.rs</File>
+      </TestFiles>
+      <TraceAssertion>Нагрев требует допуска. Обе ветви подтверждают OFF в текущем сеансе. Ошибка журнала запрещает выдачу тока.</TraceAssertion>
+    </V-M-CVTL-SAFETY>
+    <V-M-CVTL-INSTRUMENTS>
+      <Command>cargo test --locked -p cvtl-instruments</Command>
+      <Scenario>Фрагментация, таймаут, некорректные кадры и фаззинг ответов.</Scenario>
+      <TestFiles>
+        <File>crates/cvtl-instruments/tests/loopback.rs</File>
+        <File>crates/cvtl-instruments/tests/response_fuzz.rs</File>
+      </TestFiles>
+      <TraceAssertion>Декодеры, таймауты и ошибки обмена проверяются на локальном loopback и байтовом корпусе.</TraceAssertion>
+    </V-M-CVTL-INSTRUMENTS>
+    <V-M-CVTL-SIM>
+      <Command>cargo test --locked -p cvtl-sim</Command>
+      <Scenario>Обмен по loopback, инъекции отказов и проверка OFF обеих ветвей.</Scenario>
+      <TestFiles>
+        <File>crates/cvtl-sim/tests/keithley_integration.rs</File>
+        <File>crates/cvtl-sim/tests/lakeshore_protocol.rs</File>
+        <File>crates/cvtl-sim/tests/m5_fault_matrix.rs</File>
+        <File>crates/cvtl-sim/tests/m5_tcp_supervisor.rs</File>
+      </TestFiles>
+      <TraceAssertion>Симуляторы воспроизводят отклик нагрузки и отказы. TCP-сценарии проверяют реакцию и подтверждения OFF.</TraceAssertion>
+    </V-M-CVTL-SIM>
+    <V-M-CVTL-STORE>
+      <Command>cargo metadata --locked --no-deps --format-version 1</Command>
+      <Scenario>Структурная проверка зарезервированного крейта по cargo metadata. Writer и файловые тесты запланированы.</Scenario>
+      <TraceAssertion>Только структурная проверка: cvtl-store зарегистрирован в workspace и не объявляет зависимостей. Файловые проверки запланированы в RECORDING.</TraceAssertion>
+    </V-M-CVTL-STORE>
+    <V-M-CVTL-DAEMON>
+      <Command>cargo run --locked -p cvtl-daemon -- config/simulator.yaml</Command>
+      <Scenario>Запуск с config/simulator.yaml.</Scenario>
+      <TraceAssertion>Запуск с конфигом поставки завершает проверку без обращения к оборудованию.</TraceAssertion>
+    </V-M-CVTL-DAEMON>
+    <V-M-CVTL-CLI>
+      <Command>cargo test --locked -p cvtl-cli</Command>
+      <Scenario>Команды wire и heater-advisor на тестовых входах.</Scenario>
+      <TestFiles>
+        <File>crates/cvtl-cli/tests/m2_cli.rs</File>
+      </TestFiles>
+      <TraceAssertion>Проверяются расчёт проводки, вывод области нагревателя и обработка отсутствующих данных.</TraceAssertion>
+    </V-M-CVTL-CLI>
+  </VD-MAIN>
+</GraceVerificationDocument>

@@ -1,0 +1,20 @@
+<GraceGraphIndex graceVersion="4.0">
+  <GraphDocuments>
+    <GD-MAIN>
+      <Path>graph/main.xml</Path>
+      <Owns>
+        <M-CVTL-CORE />
+        <M-CVTL-MATERIALS />
+        <M-CVTL-PHYSICS />
+        <M-CVTL-ENVELOPE />
+        <M-CVTL-CONTROL />
+        <M-CVTL-SAFETY />
+        <M-CVTL-INSTRUMENTS />
+        <M-CVTL-SIM />
+        <M-CVTL-STORE />
+        <M-CVTL-DAEMON />
+        <M-CVTL-CLI />
+      </Owns>
+    </GD-MAIN>
+  </GraphDocuments>
+</GraceGraphIndex>

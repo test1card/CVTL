@@ -1,0 +1,82 @@
+<GraceGraphDocument graceVersion="4.0">
+  <GD-MAIN>
+    <M-CVTL-CORE>
+      <Summary>Единицы СИ, проверка конфигураций и допуск к запуску.</Summary>
+      <Path>crates/cvtl-core/src/lib.rs</Path>
+    </M-CVTL-CORE>
+    <M-CVTL-MATERIALS>
+      <Summary>Кривые теплоёмкости и теплопроводности с проверкой диапазонов.</Summary>
+      <Path>crates/cvtl-materials/src/lib.rs</Path>
+      <Links>
+        <M-CVTL-CORE />
+      </Links>
+    </M-CVTL-MATERIALS>
+    <M-CVTL-PHYSICS>
+      <Summary>Энтальпия, виртуальное тело, тепловые мосты, баланс и проводка.</Summary>
+      <Path>crates/cvtl-physics/src/lib.rs</Path>
+      <Links>
+        <M-CVTL-CORE />
+        <M-CVTL-MATERIALS />
+      </Links>
+    </M-CVTL-PHYSICS>
+    <M-CVTL-ENVELOPE>
+      <Summary>Расчёт области источника, нагревателя и запаса по проводке.</Summary>
+      <Path>crates/cvtl-envelope/src/lib.rs</Path>
+      <Links>
+        <M-CVTL-CORE />
+      </Links>
+    </M-CVTL-ENVELOPE>
+    <M-CVTL-CONTROL>
+      <Summary>PI, распределение A/B, допустимые токи и ограничение скорости.</Summary>
+      <Path>crates/cvtl-control/src/lib.rs</Path>
+      <Links>
+        <M-CVTL-CORE />
+        <M-CVTL-ENVELOPE />
+      </Links>
+    </M-CVTL-CONTROL>
+    <M-CVTL-SAFETY>
+      <Summary>Монитор, автомат, супервизор M5 и контракт передачи SafetyJournal. См. ADR 0008.</Summary>
+      <Path>crates/cvtl-safety/src/lib.rs</Path>
+      <Links>
+        <M-CVTL-CORE />
+        <M-CVTL-CONTROL />
+      </Links>
+    </M-CVTL-SAFETY>
+    <M-CVTL-INSTRUMENTS>
+      <Summary>Трейты приборов, протоколы Keithley и Lake Shore 218 для симуляторов.</Summary>
+      <Path>crates/cvtl-instruments/src/lib.rs</Path>
+      <Links>
+        <M-CVTL-CORE />
+      </Links>
+    </M-CVTL-INSTRUMENTS>
+    <M-CVTL-SIM>
+      <Summary>Симуляторы приборов и нагрузки. В тестах подключаются control, envelope и safety.</Summary>
+      <Path>crates/cvtl-sim/src/lib.rs</Path>
+      <Links>
+        <M-CVTL-CORE />
+        <M-CVTL-INSTRUMENTS />
+      </Links>
+    </M-CVTL-SIM>
+    <M-CVTL-STORE>
+      <Summary>Зарезервированный крейт. Файловый writer, реплей и интеграция с safety запланированы в M6.</Summary>
+      <Path>crates/cvtl-store/src/lib.rs</Path>
+    </M-CVTL-STORE>
+    <M-CVTL-DAEMON>
+      <Summary>Точка запуска валидирует конфигурацию и завершается.</Summary>
+      <Path>crates/cvtl-daemon/src/main.rs</Path>
+      <Links>
+        <M-CVTL-CORE />
+      </Links>
+    </M-CVTL-DAEMON>
+    <M-CVTL-CLI>
+      <Summary>Автономные команды wire и heater-advisor.</Summary>
+      <Path>crates/cvtl-cli/src/main.rs</Path>
+      <Links>
+        <M-CVTL-CORE />
+        <M-CVTL-ENVELOPE />
+        <M-CVTL-MATERIALS />
+        <M-CVTL-PHYSICS />
+      </Links>
+    </M-CVTL-CLI>
+  </GD-MAIN>
+</GraceGraphDocument>

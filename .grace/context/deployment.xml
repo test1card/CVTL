@@ -1,0 +1,5 @@
+<GraceDeployment graceVersion="4.0">
+  <Applicability>applicable</Applicability>
+  <Target>Ubuntu Linux 22.04 LTS, локальный демон и веб-интерфейс по плану.</Target>
+  <Notes>Фаза A без приборов. По умолчанию hardware_enabled: false, аппаратные пороги null. Допуск на стенд согласуется отдельно.</Notes>
+</GraceDeployment>

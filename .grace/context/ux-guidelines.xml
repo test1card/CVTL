@@ -1,0 +1,5 @@
+<GraceUXGuidelines graceVersion="4.0">
+  <Applicability>applicable</Applicability>
+  <Audience>Инженер и оператор криогенного стенда.</Audience>
+  <Guideline>Русский интерфейс. Показывать единицы, качество данных, режим симуляции и причины ограничений. Критичные состояния обозначать цветом, иконкой и текстом.</Guideline>
+</GraceUXGuidelines>

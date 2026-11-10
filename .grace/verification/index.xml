@@ -1,0 +1,20 @@
+<GraceVerificationIndex graceVersion="4.0">
+  <VerificationDocuments>
+    <VD-MAIN>
+      <Path>verification/main.xml</Path>
+      <Owns>
+        <V-M-CVTL-CORE />
+        <V-M-CVTL-MATERIALS />
+        <V-M-CVTL-PHYSICS />
+        <V-M-CVTL-ENVELOPE />
+        <V-M-CVTL-CONTROL />
+        <V-M-CVTL-SAFETY />
+        <V-M-CVTL-INSTRUMENTS />
+        <V-M-CVTL-SIM />
+        <V-M-CVTL-STORE />
+        <V-M-CVTL-DAEMON />
+        <V-M-CVTL-CLI />
+      </Owns>
+    </VD-MAIN>
+  </VerificationDocuments>
+</GraceVerificationIndex>

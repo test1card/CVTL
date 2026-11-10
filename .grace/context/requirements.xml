@@ -1,0 +1,15 @@
+<GraceRequirements graceVersion="4.0">
+  <ProjectName>CVTL</ProjectName>
+  <Annotation>Виртуальная тепловая нагрузка и регулирование мощности нагревателей второй ступени криомашины.</Annotation>
+  <Keywords>криогеника, виртуальное тело, мощность, защиты, журнал</Keywords>
+  <Goals>
+    <Goal>Выполнить Фазу A по TZ.md, GOAL.md и docs/PLAN.md. Принятые решения находятся в docs/adr/.</Goal>
+  </Goals>
+  <Users>
+    <User>Инженеры и операторы криогенного стенда.</User>
+  </Users>
+  <Constraints>
+    <Constraint>Фаза A работает только с симуляторами. Поиск ресурсов и опрос приборов запрещены.</Constraint>
+    <Constraint>Сохранять первичные записи, причинный порядок и возможность автономного реплея по TZ.md §12.4 и ADR 0003.</Constraint>
+  </Constraints>
+</GraceRequirements>

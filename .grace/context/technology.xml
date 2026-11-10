@@ -1,0 +1,10 @@
+<GraceTechnology graceVersion="4.0">
+  <Language>Rust и TypeScript для прототипов GUI.</Language>
+  <Runtime>Rust 1.94.1 в CI. Bun и GRACE используются для разработки.</Runtime>
+  <Framework>Cargo workspace. Для M7 предварительно выбраны Svelte и uPlot, см. ADR 0001.</Framework>
+  <TestingStack>Cargo, аналитические эталоны, loopback-симуляторы и Playwright.</TestingStack>
+  <Observability>Свидетельства в docs/STATUS.md. Формат первичных данных задан ADR 0003, файловый тракт запланирован в M6.</Observability>
+  <OperationalConstraints>
+    <Constraint>Один владелец каждого прибора. Монотонное время для расчётов.</Constraint>
+  </OperationalConstraints>
+</GraceTechnology>
