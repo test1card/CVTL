@@ -1,0 +1,101 @@
+<GraceChangePlan graceVersion="4.0" status="approved">
+  <C-CVTL-M6-REPLAY>
+    <IntentSummary>Офлайн-реплей RECORDING v1 через одну команду cvtl-cli replay RUN_DIR. База — 695bab77ca34c6d79a087f68fafd5ac2f7d2d949 с отдельно утверждённой спецификацией. Загрузить профиль из проверенного снимка, переиспользовать recover, Controller и Supervisor, сравнить записанные решения и явно показать границу воспроизводимости. Работать последовательно, начиная с тестов каждого шага.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist>
+        <Value>M-CVTL-CLI</Value>
+        <Value>M-CVTL-STORE</Value>
+        <Value>M-CVTL-CONTROL</Value>
+        <Value>M-CVTL-SAFETY</Value>
+        <Value>.grace/changes/archive/C-CVTL-M6-RECORDING/spec.xml</Value>
+      </MustExist>
+      <MustOwn><Owner>GD-MAIN</Owner><Anchor>M-CVTL-CLI</Anchor></MustOwn>
+      <MustOwn><Owner>VD-MAIN</Owner><Anchor>V-M-CVTL-CLI</Anchor></MustOwn>
+      <MustContain><File>crates/cvtl-store/src/recovery.rs</File><Text>pub fn recover</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustNotExist>
+        <Value>crates/cvtl-cli/src/replay.rs</Value>
+        <Value>crates/cvtl-cli/tests/m6_replay.rs</Value>
+      </MustNotExist>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist>
+        <Value>crates/cvtl-cli/src/replay.rs</Value>
+        <Value>crates/cvtl-cli/src/replay/profile.rs</Value>
+        <Value>crates/cvtl-cli/tests/m6_replay.rs</Value>
+      </MustExist>
+      <MustLink><From>M-CVTL-CLI</From><To>M-CVTL-STORE</To></MustLink>
+      <MustLink><From>M-CVTL-CLI</From><To>M-CVTL-CONTROL</To></MustLink>
+      <MustLink><From>M-CVTL-CLI</From><To>M-CVTL-SAFETY</To></MustLink>
+      <MustVerify><Module>M-CVTL-CLI</Module></MustVerify>
+      <MustContain><File>crates/cvtl-cli/src/main.rs</File><Text>replay::run</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustNotContain><File>crates/cvtl-cli/src/replay.rs</File><Text>LoopbackTcp</Text></MustNotContain>
+      <MustPassCommand>
+        <Command budgetSeconds="2">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="18">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-CLI /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-CLI /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.lock</File>
+      <File>crates/cvtl-cli/Cargo.toml</File>
+      <File>crates/cvtl-cli/src/main.rs</File>
+      <File>crates/cvtl-cli/src/replay.rs</File>
+      <File>crates/cvtl-cli/src/replay/profile.rs</File>
+      <File>crates/cvtl-cli/tests/m6_replay.rs</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/STATUS.md</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Совместимость снимка и метаданных v1</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала написать тесты загрузчика. Загрузчик в replay/profile.rs ограниченно читает метаданные и снимок, проверяет SHA-256 исходных байтов и объявленных локальных references, схему v1 и соответствие профилей YAML m6_recording_v1 и JSON test_only_m6_recording_v1. Проверить допустимые уникальные имена справочников и обычные локальные файлы, принадлежность записей run/generation сверяется с метаданными. Несовпадения и неподдерживаемый профиль дают явную диагностику.</Criterion>
+          <Criterion>Типизированный test_only передаёт фактические параметры снимка конструкторам M4/M5. Переиспользовать проверку вложенного phase_a_config через cvtl_core::Config. Поддержать заявленные симметричные параметры профиля v1. Неизвестные режимы, значения quantum/derivative отличные от null и попытка включить hardware отклоняются. software_version проверяет совместимость.</Criterion>
+          <Criterion>CLI добавляет существующие зависимости cvtl-store, cvtl-control, cvtl-safety, serde_json, sha2; cvtl-sim и zstd допустимы только как dev-зависимости для реальных записанных fixtures и подготовки повреждённых копий. Новых crate-ов и изменений production-зависимостей на транспорт нет. Cargo.lock фиксирует зависимости.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-cli replay::profile</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Один офлайн-реплей и точное сравнение решений</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала написать проверки последовательности и неполных данных. cvtl-cli replay RUN_DIR использует существующий recover; результат содержит границу проверенного raw, последний воспроизведённый такт, первую диагностику и отдельно историческую завершённость. Одна ограниченная логическая операция хранится в памяти. Записи Run разбираются в порядке seq по событиям восстановления и Stop, поскольку корреляция Run переиспользуется. Оборванный кадр и неполный логический такт различаются; повреждённый средний кадр не пропускается.</Criterion>
+          <Criterion>Воссоздать MonitorInput и Tick из сохранённых значений и снимка. Времена из наносекунд преобразовывать так же, как в RECORDING. Один адаптер SafetyJournal в памяти фиксирует наблюдение, операторское действие и контрольные результаты для побитового сравнения. Сохранённые Control/CommandIntent не используются как расчётные входы. Старт, сброс и остановка проходят через Supervisor, Controller сбрасывает историю на тех же подтверждённых переходах. Запрос, ограничение, измеренная мощность, ветвевые цели, причины, флаги и типизированные токи сравниваются с оригиналом.</Criterion>
+          <Criterion>Сохранённые ответы симулятора используются только как свидетельства исполнения. Для подтверждения ON/OFF сверять связь с отправкой и ответом каждой ветви в той же операции. OutputEvidence сравнивается с пересчитанным состоянием. Источник и журнал с потерянным первичным отказом или ответом оставляют явную границу недостаточности. Эффекты реплея существуют только в памяти. Первичные файлы открываются на чтение, сетевых соединений нет.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-cli replay::tests</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Сквозные fixtures RECORDING и отрицательные случаи</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>В тестах генерировать небольшой номинальный прогон существующим файловым writer-ом на TCP-эмуляторах. Для полного отказа использовать отключение эмулятора Lake Shore при исправном writer-е, чтобы сохранить исходные входы, ThermometerLinkLost и ответы обеих ветвей OFF. Офлайн CLI дважды выдаёт одинаковый результат на тех же байтах. Проверить SHA файлов до и после.</Criterion>
+          <Criterion>Сохранённый расчётный результат в тестовой копии подменяется с пересборкой корректного кадра и выявляется как расхождение. Проверить чужой run/generation, изменённый снимок и справочник, неизвестную схему или профиль, оборванный хвост, повреждённый средний кадр, полный кадр с неполным тактом и отсутствие подтверждения исхода. Приемлемая численная граница этого профиля — побитовое совпадение.</Criterion>
+          <Criterion>Отдельно прогнать готовый CLI на сохранённом опорном номинальном raw RECORDING из 600 тактов. Подтвердить число сопоставленных тактов, повторяемость вывода и неизменность исходных хэшей. Этот локальный архив служит свидетельством приёмки, fixture автоматических тестов создаётся из репозитория.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-cli --test m6_replay</Command></Verification>
+      </T-003>
+      <T-004>
+        <Title>Проекции и проверка пакета</Title>
+        <DependsOn>T-003</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Обновить только CLI-якоря и разметить затронутые CLI-файлы. Проверить обычный Cargo-граф до транзитивных зависимостей: CLI не зависит от cvtl-sim/cvtl-instruments вне dev-цепочки. Поведение прежних CLI-команд сохраняется. STATUS фиксирует свидетельства, открытые границы и отдельную приёмку. Все коммиты проходят общий PASS и Simplicity PASS на точном дереве.</Criterion>
+          <Criterion>Бюджеты target относятся к прогретому offline-прогону после cargo test --workspace --locked --no-run. Три замера на базе RECORDING с macOS ARM64 Rust 1.94.1 дали максимум 0,2481 с для fmt и 4,1997 с для workspace tests. Бюджет равен ceil(4 × максимум) + 1 с. Точный baseline до первой правки, затем target и final по утверждённым командам.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo fmt --all -- --check</Command>
+          <Command>cargo build --workspace --locked</Command>
+          <Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command>
+          <Command>cargo test --workspace --locked</Command>
+        </Verification>
+      </T-004>
+    </ImplementationPlan>
+  </C-CVTL-M6-REPLAY>
+</GraceChangePlan>
