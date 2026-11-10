@@ -1,4 +1,4 @@
-<GraceChangeSpec graceVersion="4.0" status="draft">
+<GraceChangeSpec graceVersion="4.0" status="approved">
   <C-CVTL-M6-RECORDING>
     <Summary>Первичная запись прогона Фазы A и связь отказов записи с защитами M5. Основание — TZ.md §10.3 и §12.4, GOAL.md, docs/PLAN.md, ADR 0003 и 0008.</Summary>
     <Problem>На базе 0c3d1a7 супервизор использует контракт SafetyJournal, проверенный с тестовыми приёмниками. cvtl-store зарезервирован. Для воспроизведения нужны полные входы и причинный порядок, а для безопасного нагрева — наблюдение здоровья всего тракта raw после принятия записи.</Problem>

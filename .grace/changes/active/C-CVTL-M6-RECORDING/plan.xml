@@ -1,0 +1,180 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M6-RECORDING>
+    <IntentSummary>Реализовать утверждённую спецификацию RECORDING последовательно, начиная с базы 5a6374cb2fbd8bc97cdf7d7f7e2f52096b3916c3 и этого процессного коммита с одобренной спецификацией. Один владелец симуляционного контура принимает raw и выдаёт эффекты M5, один файловый поток пишет независимые кадры. Точка запуска — отдельный пример cvtl-sim m6_recording с локально поднятыми симуляторами, каталогом прогона и профилем test_only. Штатный запуск демона остаётся проверкой конфигурации. ADR 0003 задаёт данные, ADR 0008 — допуск и OFF. REPLAY, IMPORT, GUI, анализ, отчёт и экспорт в этом пакете не выполняются.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist>
+        <Value>M-CVTL-STORE</Value>
+        <Value>M-CVTL-SAFETY</Value>
+        <Value>M-CVTL-SIM</Value>
+        <Value>docs/adr/0003-run-data.md</Value>
+        <Value>docs/adr/0008-safety-supervisor.md</Value>
+      </MustExist>
+      <MustOwn><Owner>GD-MAIN</Owner><Anchor>M-CVTL-STORE</Anchor></MustOwn>
+      <MustOwn><Owner>VD-MAIN</Owner><Anchor>V-M-CVTL-STORE</Anchor></MustOwn>
+      <MustContain><File>crates/cvtl-store/src/lib.rs</File><Text>Reserved boundary for the store milestone.</Text></MustContain>
+      <MustContain><File>crates/cvtl-safety/src/supervisor.rs</File><Text>fn record(&amp;mut self, record: SafetyRecord&lt;'_&gt;) -&gt; Result&lt;(), JournalError&gt;</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustNotContain><File>crates/cvtl-safety/Cargo.toml</File><Text>cvtl-store</Text></MustNotContain>
+      <MustNotExist>
+        <Value>crates/cvtl-store/src/writer.rs</Value>
+        <Value>crates/cvtl-sim/src/recording.rs</Value>
+      </MustNotExist>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist>
+        <Value>crates/cvtl-store/tests/records.rs</Value>
+        <Value>crates/cvtl-store/tests/admission.rs</Value>
+        <Value>crates/cvtl-store/tests/health.rs</Value>
+        <Value>crates/cvtl-store/tests/file_session.rs</Value>
+        <Value>crates/cvtl-sim/tests/m6_recording.rs</Value>
+        <Value>crates/cvtl-sim/examples/m6_recording.rs</Value>
+        <Value>crates/cvtl-store/examples/m6_recording_io.rs</Value>
+      </MustExist>
+      <MustLink><From>M-CVTL-STORE</From><To>M-CVTL-SAFETY</To></MustLink>
+      <MustLink><From>M-CVTL-SIM</From><To>M-CVTL-STORE</To></MustLink>
+      <MustVerify>
+        <Module>M-CVTL-STORE</Module>
+        <Module>M-CVTL-SAFETY</Module>
+        <Module>M-CVTL-SIM</Module>
+      </MustVerify>
+      <MustContain><File>crates/cvtl-store/src/lib.rs</File><Text>START_MODULE_CONTRACT</Text></MustContain>
+      <MustContain><File>crates/cvtl-safety/src/supervisor.rs</File><Text>fn record(&amp;mut self, record: SafetyRecord&lt;'_&gt;) -&gt; Result&lt;(), JournalError&gt;</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustNotContain><File>crates/cvtl-safety/Cargo.toml</File><Text>cvtl-store</Text></MustNotContain>
+      <MustPassCommand>
+        <Command budgetSeconds="2">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="12">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors>
+        <M-CVTL-STORE />
+        <M-CVTL-SAFETY />
+        <M-CVTL-SIM />
+      </GraphAnchors>
+      <VerificationAnchors>
+        <V-M-CVTL-STORE />
+        <V-M-CVTL-SAFETY />
+        <V-M-CVTL-SIM />
+      </VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.lock</File>
+      <File>crates/cvtl-store/Cargo.toml</File>
+      <File>crates/cvtl-store/src/lib.rs</File>
+      <File>crates/cvtl-store/src/record.rs</File>
+      <File>crates/cvtl-store/src/ingress.rs</File>
+      <File>crates/cvtl-store/src/health.rs</File>
+      <File>crates/cvtl-store/src/writer.rs</File>
+      <File>crates/cvtl-store/src/recovery.rs</File>
+      <File>crates/cvtl-store/tests/records.rs</File>
+      <File>crates/cvtl-store/tests/admission.rs</File>
+      <File>crates/cvtl-store/tests/health.rs</File>
+      <File>crates/cvtl-store/tests/file_session.rs</File>
+      <File>crates/cvtl-store/examples/m6_recording_io.rs</File>
+      <File>crates/cvtl-safety/src/supervisor.rs</File>
+      <File>crates/cvtl-safety/tests/supervisor.rs</File>
+      <File>crates/cvtl-sim/Cargo.toml</File>
+      <File>crates/cvtl-sim/src/lib.rs</File>
+      <File>crates/cvtl-sim/src/recording.rs</File>
+      <File>crates/cvtl-sim/examples/m6_recording.rs</File>
+      <File>crates/cvtl-sim/tests/m6_recording.rs</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/STATUS.md</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Формат первичных записей и неизменяемый снимок</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Явные версионированные DTO с единицами СИ и стабильными тегами содержат run, поколение, seq, tick или request, ветвь, монотонное время приёма и исходные времена отсчётов. Обязательны исходные I/V и термометрия с качеством и отсутствующими каналами, параметры/изменения и dH_event, входы планировщика, операторские и защитные события, запрос/ограничение/факт мощности, отдельные intent, dispatch и response. Ошибка измерения обозначается статусом и null, доступные сырые байты сохраняются. Отсутствующая величина не подменяется нулём или синтетическим измерением.</Criterion>
+          <Criterion>serde и serde_json кодируют полные строки в ограниченный буфер до 16 KiB с UTF-8, метаданными, экранированием и LF. Размеры заимствованных полей проверяются до копирования, числа и enum преобразуются явно. Проверяются граничные размеры, round-trip, отказ без усечения, диапазон seq и неизвестная версия.</Criterion>
+          <Criterion>Снимок включает фактически применённую конфигурацию симулятора и идентификаторы test_only-сценария. meta.json фиксирует schema, версию программы, хэши SHA-256 снимка и использованных неизменяемых справочников. Для отсутствующих справочников и входов задокументирован явный статус. Файлы прогона создаются без перезаписи предыдущего сеанса. Допуск ждёт квитанцию готовности снимка и метаданных.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-store --test records</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Атомарный приём пакетов и ограничение памяти</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Владелец управления — единственный producer, файловый поток — единственный consumer SPSC-кольца rtrb. Один элемент — неделимый пакет полных строк. Producer заранее готовит весь пакет в ограниченном буфере, проверяет здоровье, размер, seq и одновременно оба остатка квоты. Один успешный push публикует весь пакет. При отказе ни строка, ни seq, ни квитанция допуска не публикуются. Принятый пакет получает диапазон seq и квитанцию с поколением и идентификатором тика/запроса.</Criterion>
+          <Criterion>В очереди не более 1024 записей и 8 MiB полезных байтов. При извлечении пакета writer возвращает одним сообщением монотонные накопительные счётчики извлечённых записей и байтов. Владелец вычитает их из accepted-счётчиков для проверки обоих остатков. Устаревшее подтверждение может только временно уменьшить доступный остаток. До освобождения квоты producer не перезаписывает данные. Буфер подготовки, текущий пакет writer-а, кадр до 256 KiB, буферы сжатия и ledger считаются отдельно. Ledger хранит до двух ёмкостей очереди по числу записей, только фиксированные метаданные. Его исчерпание — отдельная явная ошибка приёма, квоты test_only не меняются.</Criterion>
+          <Criterion>SafetyJournal принимает заимствованную запись через тот же bounded-приёмник, копирует только ограниченные поля и возвращает Ok после фактического push. Нет Zstd, диска, ожидания writer-а или освобождения очереди. Отрицательные тесты закрывают оба лимита отдельно, переполнение ledger, сбой внутри многозаписного пакета, граничные значения байтов, отсутствие разрывов seq и отказ после закрытия.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-store --test admission</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Публикация границ и проверка дедлайнов</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Writer передаёт извлечение пакета, written и sync в обратном SPSC-потоке с поколением, видом операции и границей seq. Ёмкость — три записи обратной связи на слот ledger плюс два служебных сообщения готовности и закрытия. Приём ограничен объёмом ledger, публикация не ждёт места. Отдельный атомарный сигнал первой фатальной ошибки не зависит от места в обратной очереди и покрывает ошибку, panic, обрыв и переполнение квитанций. Владелец обрабатывает сообщения между тиками, перед допуском и перед каждой ветвью, без ожидания. Он единственный публикует согласованные accepted, written и durable. Возврат I/O — диагностическое событие, время durable задаёт монотонная публикация владельцем.</Criterion>
+          <Criterion>Ledger хранит время приёма для каждой ещё не синхронизированной записи и отдельный срок прогресса. До продвижения written или durable владелец проверяет предыдущий срок прогресса и возраст старейшей несинхронизированной записи. При durable до освобождения ledger проверяет дедлайны всего покрытого префикса. Written не снимает контроль возраста. Границы продвигаются только по непрерывному префиксу текущего поколения. Метаданные удаляются после сохранения факта любой просрочки. Пустая очередь, heartbeat, вход в I/O и новые записи срок не сбрасывают. Оба watchdog — 2 с, равенство означает просрочку. Поздняя квитанция может уточнить префикс, но не здоровье. Ошибка, panic или обрыв имеют приоритет перед отсутствием прогресса, затем возрастом.</Criterion>
+          <Criterion>С управляемыми монотонными часами без sleep проверить до, ровно и после дедлайна, оба порядка событий при равных отметках, late ack между тиками, возврат sync до срока с поздней публикацией, одну квитанцию для нескольких seq с разными сроками, обратный ход времени, старое поколение, пустую очередь при зависшем sync, written без durable и отказ после принятого record.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-store --test health</Command></Verification>
+      </T-003>
+      <T-004>
+        <Title>Файловый writer и границы записи</Title>
+        <DependsOn>T-001, T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Всё файловое I/O и Zstd находятся в одном worker-е. Каталог и обязательные файлы готовятся до допуска. Целые строки упаковываются в независимые Zstd-кадры с включённой проверяемой checksum. Максимум несжатых данных кадра 256 KiB, целевое накопление 250 мс от первой строки, попытка sync каждые 1 с при наличии данных. Перед sync кадр закрыт и flush завершён. written подтверждает полностью сброшенный кадр, durable публикуется только после успешного sync_all для того же префикса.</Criterion>
+          <Criterion>events.ndjson формируется по принятым raw seq как производное представление. Отказ его формирования диагностируется отдельно от raw. Для файловой границы предусмотрены короткая запись, EIO/ENOSPC, ошибка flush/sync, panic и неожиданный выход. Тестируемый sink даёт инъекции, worker фиксирует ошибки без ожидания освобождения канала.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-store --test file_session</Command></Verification>
+      </T-004>
+      <T-005>
+        <Title>Конечное завершение и восстановление префикса</Title>
+        <DependsOn>T-003, T-004</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Владелец прекращает приём и фиксирует последний accepted. Отдельный сигнал закрытия не требует свободного места в очереди. Файловый поток дописывает очередь, закрывает кадр, выполняет flush и sync и возвращает финальную квитанцию. Неблокирующие begin_close и poll_close используют отдельный бюджет ожидания 2 с от запроса в сценарии test_only. Владелец принимает Completed только при своевременной финальной квитанции, полном durable-префиксе и здоровом сеансе. Ошибка и Timeout различимы. Close и Drop не делают безусловный join, команда OFF и чтение подтверждений идут независимо.</Criterion>
+          <Criterion>Только владелец публикует терминальный результат и квитанцию Completed в результате закрытия. Writer не пишет авторитетную отметку Completed в файл. По Timeout состояние терминально, результат позднего sync сохраняется только как диагностика. При чтении одних файлов без квитанции владельца можно подтвердить восстановленный префикс, исторический Completed остаётся неизвестным. Зависшая системная операция не считается прерванной. Один владелец не запускает новые writer-ы взамен зависшего, пока предыдущий не вышел.</Criterion>
+          <Criterion>Reader проверяет checksum, конкатенацию кадров, целые строки, непрерывность seq и лимиты декодирования. EOF внутри кадра отличается от ошибки checksum/структуры или повреждения середины, пропуски и молчаливое восстановление после повреждения запрещены. Принудительное завершение дочернего процесса и повторное чтение не меняют raw. Проверяются нормальное закрытие, ошибка финального sync, зависший sync, терминальность Timeout и отсутствие повторного допуска. При потере данных без доказательства границы отмечается неизвестная полнота. Стойкость при потере питания остаётся непроверенной.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-store --test file_session</Command></Verification>
+      </T-005>
+      <T-006>
+        <Title>Замкнутый контур с M5 и блокировка выхода по raw</Title>
+        <DependsOn>T-003, T-005</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Один loopback-владелец атомарно принимает пакет всех обязательных первичных входов Start или тика до вызова operate или observe. SafetyJournal принимает настоящие записи M5 тем же путём. В SafetyRecord::Control добавить заимствованную фактическую телеметрию ControlOutput для записи запроса, ограничения и измерения. Контракт record сохраняется. Кандидат EnableBoth или currents из Supervisor остаётся внутри владельца, пока не приняты согласованные command_intent для всего набора ветвей, не проверены здоровье и квитанция входов этого же поколения и запроса/тика.</Criterion>
+          <Criterion>Закрытая одноразовая квитанция допуска привязана к входному диапазону, результату M5 и принятому intent. Только владелец может отправить команды. Перед каждой ветвью он проверяет квитанцию, актуальное здоровье, для ON — can_enable текущего запроса, для Drive — текущий Running и исходный одноразовый допуск. Уменьшения идут перед увеличениями. Никакой обмен не выполняется под блокировкой writer-а. Ошибка после проверки или частичная отправка выявляется до следующей ветви либо на следующем работающем тике. Гарантия относится к сериализации допуска, а не к атомарности передачи по TCP.</Criterion>
+          <Criterion>Минимальный вход Supervisor::journal_failed аннулирует допуск и использует действующий trip JournalFailure. Монитор продолжает получать journal_ok. Первый отказ M5 сохраняется, новый fault не обходит уже выданный DisableBoth. OFF выполняется через существующий disable_both до ожидания readback. Недостоверное доказательство оставляет Unknown и действующий резервный путь. Отказ от записи OFF не отменяет действие. На восстановлении новый сеанс и свежий OFF, явный Reset и новые Arm/Start. Старые квитанции, повтор тика и восстановление writer-а не разрешают нагрев.</Criterion>
+          <Criterion>Приватный адаптер MessageTransport захватывает фактические события send/query в ограниченный буфер без файлового I/O. Успешная отправка и отдельный ответ фиксируются по доступному доказательству. При ошибке, когда отправку установить нельзя, пишется неизвестный результат. Сбой записи dispatch/response запрещает последующие команды и ведёт к OFF. Не менять драйверы. На loopback проверяются нормальный записанный прогон, непринятый пакет перед ON/Drive, оба вида переполнения, фоновая ошибка после Ok, остановка при заблокированном sink, отказ после первой ветви, отсутствие нового ON после разрыва и восстановления, подтверждение обеих ветвей или Unknown. Существующие проверки M5 сохранены.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo test --locked -p cvtl-safety --test supervisor</Command>
+          <Command>cargo test --locked -p cvtl-sim --test m6_recording</Command>
+        </Verification>
+      </T-006>
+      <T-007>
+        <Title>Измерения файлового тракта на хосте</Title>
+        <DependsOn>T-003, T-005</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Пример m6_recording_io пишет синтетические записи в реальную ФС в отдельном временном каталоге, без приборов. Измеряет приём, задержку очереди, encode/write/flush, sync и время от принятия до публикации durable. Нагрузки включают репрезентативный поток и всплеск до 100 максимальных записей в секунду, фиксируют размеры кадров/очереди, пропуски, p50/p95/p99/max и долю нарушений сроков.</Criterion>
+          <Criterion>В журнале измерений указаны ОС, toolchain, файловая система, доступные сведения о накопителе, параметры и длительность прогона. Управляемые часы и блокируемый sink проверяют логику отдельно. Замеры характеризуют только этот файловый тракт. Если профиль не выдержан, сохранить свидетельство и вынести изменение на отдельное согласование.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo run --release --locked -p cvtl-store --example m6_recording_io</Command></Verification>
+      </T-007>
+      <T-008>
+        <Title>Свидетельства, GRACE и итоговая проверка</Title>
+        <DependsOn>T-006, T-007</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Манифест store добавляет только прямые зависимости cvtl-safety, serde, serde_json, sha2, zstd и rtrb. Манифест sim добавляет cvtl-store и переносит в обычные только используемые владельцем зависимости M4/M5. Cargo.lock фиксирует разрешённые версии. Проверить Cargo metadata с разбором JSON на направления store → safety и sim → store, отсутствие safety → store и циклов. Config, CI, GUI, физика, регулятор и приборные драйверы не меняются.</Criterion>
+          <Criterion>Разметить новые STORE и sim-recording и затронутый Supervisor, сопоставить реальные MODULE_MAP и тесты. Обновить только M/V-якоря в DurableScope. Сверить тестовые файлы и команды, не считать наличие маркера доказательством поведения. Проверить весь ObservedWriteScope, включая тесты и docs/STATUS.md.</Criterion>
+          <Criterion>Бюджеты целевых команд относятся к прогретому offline-прогону после cargo test --workspace --locked --no-run. На базе M5/G1 macOS ARM64 Rust 1.94.1 три прогона fmt заняли до 0,248 с, workspace test — до 2,576 с. Бюджет равен ceil(4 × наблюдавшийся максимум) + 1 с. Для целевого дерева времена измеряются повторно. При превышении бюджетов согласовать изменение плана, не ослаблять утверждённые проверки. Холодная сборка и файловый бенчмарк идут отдельными проверками.</Criterion>
+          <Criterion>Перед первой правкой выполнить baseline для выбранного утверждённого плана. После выполнения провести target и final с разрешёнными leaf-командами. STATUS фиксирует реальные команды, среду, коды возврата и ограничения. Каждое дерево к коммиту проходит независимое ревью GPT-6 Astra. Старый CI сохраняется, аппаратные и GUI-свидетельства не подменяются.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo metadata --locked --no-deps --format-version 1</Command>
+          <Command>cargo fmt --all -- --check</Command>
+          <Command>cargo build --workspace --locked</Command>
+          <Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command>
+          <Command>cargo test --workspace --locked --no-run</Command>
+          <Command>cargo test --workspace --locked</Command>
+          <Command>cargo run --locked -p cvtl-daemon -- config/simulator.yaml</Command>
+        </Verification>
+      </T-008>
+    </ImplementationPlan>
+  </C-CVTL-M6-RECORDING>
+</GraceChangePlan>
