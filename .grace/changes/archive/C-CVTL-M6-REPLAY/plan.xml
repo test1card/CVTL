@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="approved">
+<GraceChangePlan graceVersion="4.0" status="applied">
   <C-CVTL-M6-REPLAY>
     <IntentSummary>Офлайн-реплей RECORDING v1 через одну команду cvtl-cli replay RUN_DIR. База — 695bab77ca34c6d79a087f68fafd5ac2f7d2d949 с отдельно утверждённой спецификацией. Загрузить профиль из проверенного снимка, переиспользовать recover, Controller и Supervisor, сравнить записанные решения и явно показать границу воспроизводимости. Работать последовательно, начиная с тестов каждого шага.</IntentSummary>
     <BaselineAssertions>
