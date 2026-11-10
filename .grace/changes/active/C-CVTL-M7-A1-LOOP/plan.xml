@@ -1,0 +1,102 @@
+<GraceChangePlan graceVersion="4.0" status="approved">
+  <C-CVTL-M7-A1-LOOP>
+    <IntentSummary>Один замкнутый headless-сценарий A1 на базе 5015f93a81817f36068c36db54c90cda0c06efb8. Добавить учёт фактической энергии в Keithley, один профиль тела и головки в существующем RecordingLoop и версионированные данные теплового шага. Сохранить v1 и действующие границы M5. Работать последовательно, начиная с тестов.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist>
+        <Value>M-CVTL-SIM</Value>
+        <Value>M-CVTL-STORE</Value>
+        <Value>M-CVTL-PHYSICS</Value>
+        <Value>.grace/changes/archive/C-CVTL-M7-A1-HEAD/spec.xml</Value>
+        <Value>crates/cvtl-sim/tests/a1_head.rs</Value>
+        <Value>crates/cvtl-cli/tests/m6_replay.rs</Value>
+      </MustExist>
+      <MustOwn><Owner>GD-MAIN</Owner><Anchor>M-CVTL-SIM</Anchor></MustOwn>
+      <MustContain><File>crates/cvtl-sim/src/recording.rs</File><Text>test_only_m6_recording_v1</Text></MustContain>
+      <MustNotExist><Value>crates/cvtl-sim/src/a1.rs</Value><Value>crates/cvtl-sim/tests/a1_loop.rs</Value></MustNotExist>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist>
+        <Value>crates/cvtl-sim/src/a1.rs</Value>
+        <Value>crates/cvtl-sim/examples/m7_a1_loop.rs</Value>
+        <Value>crates/cvtl-sim/tests/a1_loop.rs</Value>
+      </MustExist>
+      <MustLink><From>M-CVTL-SIM</From><To>M-CVTL-PHYSICS</To></MustLink>
+      <MustLink><From>M-CVTL-SIM</From><To>M-CVTL-MATERIALS</To></MustLink>
+      <MustVerify><Module>M-CVTL-SIM</Module><Module>M-CVTL-STORE</Module></MustVerify>
+      <MustContain><File>crates/cvtl-store/src/record.rs</File><Text>a1_step_v1</Text></MustContain>
+      <MustContain><File>crates/cvtl-sim/src/recording.rs</File><Text>test_only_m6_recording_v1</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="3">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="19">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-SIM /><M-CVTL-STORE /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-SIM /><V-M-CVTL-STORE /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.lock</File>
+      <File>crates/cvtl-sim/Cargo.toml</File>
+      <File>crates/cvtl-sim/src/lib.rs</File>
+      <File>crates/cvtl-sim/src/a1.rs</File>
+      <File>crates/cvtl-sim/src/keithley.rs</File>
+      <File>crates/cvtl-sim/src/recording.rs</File>
+      <File>crates/cvtl-sim/examples/m7_a1_loop.rs</File>
+      <File>crates/cvtl-sim/tests/a1_loop.rs</File>
+      <File>crates/cvtl-store/src/record.rs</File>
+      <File>crates/cvtl-store/tests/records.rs</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/STATUS.md</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Версионированная запись A1 и фактическая энергия эмулятора</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>До кода добавить тест кодека. Сохранить номер схемы и все прежние поля. Новый профиль различается идентификатором test_only_a1_loop_v1 в meta и снимке. В Inputs добавить типизированное optional a1_step_v1 с serde default и пропуском поля при None. Блок фиксирует модельный интервал в нс, энергию A/B в Дж, удержанное температурное наблюдение tf и его возраст, конечную температуру тела и опциональное изменение с новыми scale или G, знаковым dH_event и температурами до/после изменения. Проверять конечность, положительность шага и валидность параметров. В прежнем JSON поле отсутствует, старый CLI отвергает неподдерживаемый профиль.</Criterion>
+          <Criterion>До кода добавить тест учёта энергии. В существующем Keithley при включённом только для A1 счётчике интегрировать фактическое U × I каждой ветви по монотонному времени под тем же lock непосредственно перед изменением состояния и при чтении интервала. Отсутствие readback не обнуляет энергию. Считывание возвращает время и энергию обеих ветвей, затем начинает следующий интервал. Никакого нового потока или очереди. Для теста ON и OFF проверять энергию между нижней и верхней границами по измеренным отметкам до/после каждой команды с численным запасом 1e-9 Дж, без подмены фактического времени длительностью sleep.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo test --locked -p cvtl-store --test records</Command>
+          <Command>cargo test --locked -p cvtl-sim --test a1_loop energy_</Command>
+        </Verification>
+      </T-001>
+      <T-002>
+        <Title>Модельный шаг, владелец контура и запись A1</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>До кода добавить сквозные тесты. Одна приватная ветка A1 в существующем RecordingLoop и один набор состояния Body/HEAD. Тестовый эталон OFHC 20 кг из существующего NIST-каталога, T тела 30 К, scale 0,1 → 0,2, постоянный мост 0,02 → 0,04 Вт/К, порт tf и AdditionalLoad с нулевым паразитным притоком тела. HEAD стартует с (45,15,16) К, C=(10,20,5) Дж/К, связи (0,05;0,5) Вт/К, тестовый jacket 77 К. Синтетический отвод (2,4) Вт хранится только у генератора. Снимок фиксирует начальные параметры и точные байты использованного каталога через references. Эти числа не меняют прежние test_only сценарии и не являются параметрами реального стенда.</Criterion>
+          <Criterion>На первом разрешённом Start перед ON начать учёт энергии, используя измеренное tf из принятых входов. Перед очередным измерением получить прошедший интервал и фактические Дж, применить среднюю мощность этого интервала в явном шаге HEAD, опубликовать температуры. Body проходит тот же интервал с предыдущим удержанным наблюдением и старым мостом. Затем применить запрошенное изменение на границе такта, записать dH и температуры. После чтения датчиков вычислить запрос по новому мосту и последнему допустимому tf. Часы M4 и таймаутов остаются штатными.</Criterion>
+          <Criterion>Возраст удержанного tf считать на конце модельного интервала от начала соответствующего чтения KRDG. Допуск свежести берётся из max_temperature_age текущего профиля M5 test_only (1500 мс). Равенство допустимо, превышение, обратное время или недопустимый модельный шаг означают model_valid=false. До реализации добавить чистый тест на границе возраста и loopback-тест с пропуском интервала выше этого порога. Проверить отсутствие новой публикации из ошибочного шага и дальнейшего Drive, raw-признак отказа, OFF или Unknown и сохранение приоритета потери связи.</Criterion>
+          <Criterion>Тепловой блок и входы такта принимаются одной существующей пакетной записью перед допуском. Команда cargo run --release --locked -p cvtl-sim --example m7_a1_loop записывает 30 тактов с периодом расписания 100 мс и изменениями scale на такте 8 и G на такте 16 (нумерация с единицы). Короткий интеграционный fixture — восемь тактов с периодом 100 мс, изменения на тактах 3 и 5. Сравнение использует записанные фактические интервалы. Допуск непрерывности температуры 1e-6 К. dH сверяется с m × Δscale × интегралом cp от опорной температуры до температуры перед изменением с допуском 1e-6 Дж. Для теплового баланса по округлённым отсчётам головы допуск 0,036 Дж на шаг, включая погрешность округления двух наборов KRDG до 0,001 К при суммарной теплоёмкости 35 Дж/К. Допуски интегратора Body сохраняются.</Criterion>
+          <Criterion>Headless-прогон выводит каталог и доказательство OFF. Завершение фиксирует последний смоделированный интервал и отдельный OFF. Температура после границы записи остаётся неизвестной. Тест проверяет доставленную энергию, динамику головки, изменение запроса, поля снимка/блока и подтверждение обеих ветвей OFF.</Criterion>
+          <Criterion>В тесте отказа связь с источником разрывается на активном ходе. Причина, OFF или Unknown и отсутствие автоматического ON подтверждаются журналом и состоянием. В A1 только после подтверждённого нового ручного ON использовать свежий Controller той же конфигурации и сбросить last_control. Не сбрасывать HEAD или Body при переподключении, если модельная история сохраняется. Первый такт нового запуска проходит. Вызовы v1 сохраняют прежнее поведение. OFF не ждёт модель или writer.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo test --locked -p cvtl-sim --test a1_loop</Command>
+          <Command>cargo test --locked -p cvtl-sim a1::tests</Command>
+          <Command>cargo test --locked -p cvtl-sim --test m6_recording</Command>
+          <Command>cargo test --locked -p cvtl-cli --test m6_replay</Command>
+        </Verification>
+      </T-002>
+      <T-003>
+        <Title>Проекции и автономная проверка пакета</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Разметить затронутые Rust-модули и обновить только SIM/STORE якоря. SIM добавляет только локальные cvtl-materials и cvtl-physics. Регрессия v1, прежние конфиги, аппаратные драйверы и M5 остаются неизменными. STATUS фиксирует результаты, синтетические допущения, границу записи и необходимость будущего реплея A1.</Criterion>
+          <Criterion>Бюджеты относятся к прогретому offline-прогону после cargo test --workspace --locked --no-run. Три замера на базе HEAD macOS ARM64 с Rust 1.94.1 дали максимумы 0,2780 с для fmt и 4,3803 с для тестов. Бюджет ceil(4 × максимум) + 1 с. До реализации baseline, после target и final, каждый коммит с общим PASS и Simplicity PASS Astra.</Criterion>
+        </AcceptanceCriteria>
+        <Verification>
+          <Command>cargo fmt --all -- --check</Command>
+          <Command>cargo build --workspace --locked</Command>
+          <Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command>
+          <Command>cargo test --workspace --locked</Command>
+          <Command>cargo run --release --locked -p cvtl-sim --example m7_a1_loop</Command>
+        </Verification>
+      </T-003>
+    </ImplementationPlan>
+  </C-CVTL-M7-A1-LOOP>
+</GraceChangePlan>
