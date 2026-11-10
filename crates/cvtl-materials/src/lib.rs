@@ -203,17 +203,19 @@ fn source(id: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-fn nist(id: &str, property: &str) -> Result<(Curve, Provenance), MaterialError> {
+const NIST_CATALOG: &str = include_str!("../../../data/materials/nist.csv");
+
+fn nist(catalog: &str, id: &str, property: &str) -> Result<(Curve, Provenance), MaterialError> {
     const STEP_K: f64 = 0.01;
     let url = source(id).ok_or(MaterialError::UnknownMaterial)?;
-    let line = include_str!("../../../data/materials/nist.csv")
-        .lines()
-        .filter(|l| !l.starts_with('#'))
-        .find(|l| {
-            let mut x = l.split(',');
-            x.next() == Some(id) && x.next() == Some(property)
-        })
-        .ok_or(MaterialError::UnavailableProperty)?;
+    let mut rows = catalog.lines().filter(|line| {
+        let mut fields = line.split(',');
+        fields.next() == Some(id) && fields.next() == Some(property)
+    });
+    let line = rows.next().ok_or(MaterialError::UnavailableProperty)?;
+    if rows.next().is_some() {
+        return Err(MaterialError::InvalidCurve);
+    }
     let fields: Vec<&str> = line.split(',').collect();
     if fields.len() != 14 {
         return Err(MaterialError::InvalidCurve);
@@ -269,7 +271,15 @@ fn nist(id: &str, property: &str) -> Result<(Curve, Provenance), MaterialError> 
     ))
 }
 pub fn nist_heat_capacity(id: &str) -> Result<SourcedCurve<HeatCapacityCurve>, MaterialError> {
-    let (curve, provenance) = nist(id, "cp")?;
+    nist_heat_capacity_from_catalog(id, NIST_CATALOG)
+}
+
+/// Evaluate a NIST fit from the catalog text preserved with a recording.
+pub fn nist_heat_capacity_from_catalog(
+    id: &str,
+    catalog: &str,
+) -> Result<SourcedCurve<HeatCapacityCurve>, MaterialError> {
+    let (curve, provenance) = nist(catalog, id, "cp")?;
     Ok(SourcedCurve {
         curve: HeatCapacityCurve(curve),
         provenance,
@@ -278,7 +288,7 @@ pub fn nist_heat_capacity(id: &str) -> Result<SourcedCurve<HeatCapacityCurve>, M
 pub fn nist_conductivity(
     id: &str,
 ) -> Result<SourcedCurve<ThermalConductivityCurve>, MaterialError> {
-    let (curve, provenance) = nist(id, "k")?;
+    let (curve, provenance) = nist(NIST_CATALOG, id, "k")?;
     Ok(SourcedCurve {
         curve: ThermalConductivityCurve(curve),
         provenance,

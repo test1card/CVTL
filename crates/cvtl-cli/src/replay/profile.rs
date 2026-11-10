@@ -1,7 +1,7 @@
 // FILE: crates/cvtl-cli/src/replay/profile.rs
 // VERSION: 0.1.0
 // START_MODULE_CONTRACT
-//   PURPOSE: Load and validate the recorded v1 profile
+//   PURPOSE: Load and validate the recorded offline profile
 //   SCOPE: Verify identity and digests, construct existing controller and supervisor
 //   DEPENDS: M-CVTL-CORE, M-CVTL-CONTROL, M-CVTL-SAFETY, M-CVTL-STORE
 //   LINKS: M-CVTL-CLI
@@ -35,10 +35,12 @@ use cvtl_safety::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use super::a1::{Parameters, ThermalReplay};
 use crate::quantity;
 
 const MAX_HEADER: u64 = 64 * 1024;
 const PROFILE: &str = "m6_recording_v1";
+const A1_PROFILE: &str = "test_only_a1_loop_v1";
 
 #[derive(Deserialize)]
 pub(super) struct Meta {
@@ -65,6 +67,7 @@ struct Snapshot {
 #[derive(Deserialize)]
 struct TestOnly {
     scenario: String,
+    a1: Option<yaml_serde::Value>,
     temperature_channels: TemperatureChannels,
     control: Control,
     pi: Pi,
@@ -133,6 +136,14 @@ pub(super) struct Profile {
     pub meta: Meta,
     pub controller: Controller,
     pub supervisor: Supervisor,
+    pub a1: Option<ThermalReplay>,
+    test_only: TestOnly,
+}
+
+impl Profile {
+    pub(super) fn fresh_controller(&self) -> Result<Controller, String> {
+        self.test_only.controller()
+    }
 }
 
 pub(super) fn load(run: &Path) -> Result<Profile, String> {
@@ -145,9 +156,13 @@ pub(super) fn load(run: &Path) -> Result<Profile, String> {
     let bytes = header(&run.join("meta.json"))?;
     let meta: Meta =
         serde_json::from_slice(&bytes).map_err(|e| format!("Ошибка meta.json: {e}"))?;
+    let expected_profile = match meta.scenario.as_str() {
+        "test_only_m6_recording_v1" => PROFILE,
+        A1_PROFILE => A1_PROFILE,
+        _ => return Err("Несовместимая схема, профиль, версия или идентификатор прогона".into()),
+    };
     if meta.schema != cvtl_store::record::SCHEMA
         || meta.software_version != env!("CARGO_PKG_VERSION")
-        || meta.scenario != "test_only_m6_recording_v1"
         || !safe_name(&meta.run)
         || meta.generation == 0
     {
@@ -159,7 +174,7 @@ pub(super) fn load(run: &Path) -> Result<Profile, String> {
         &meta.config_sha256,
         Sha256::digest(&config),
     )?;
-    verify_references(run, &meta)?;
+    let catalog = verify_references(run, &meta, expected_profile == A1_PROFILE)?;
     let snapshot: Snapshot =
         yaml_serde::from_slice(&config).map_err(|e| format!("Ошибка снимка YAML: {e}"))?;
     if snapshot.hardware_enabled {
@@ -168,20 +183,38 @@ pub(super) fn load(run: &Path) -> Result<Profile, String> {
     let phase_a = yaml_serde::to_string(&snapshot.phase_a_config)
         .map_err(|e| format!("Ошибка phase_a_config: {e}"))?;
     Config::from_yaml(&phase_a).map_err(|e| e.to_string())?;
-    let test = snapshot.test_only;
-    if test.scenario != PROFILE
+    let mut test = snapshot.test_only;
+    if test.scenario != expected_profile
         || test.safety.profile != "m5_test_only_example"
         || test.pi.quantum.is_some()
         || test.pi.derivative.is_some()
     {
         return Err("Неподдерживаемый профиль параметров REPLAY v1".into());
     }
+    let a1 = if expected_profile == A1_PROFILE {
+        let parameters: Parameters = yaml_serde::from_value(
+            test.a1
+                .take()
+                .ok_or("Отсутствуют параметры теплового профиля A1")?,
+        )
+        .map_err(|error| format!("Непригодные параметры теплового профиля A1: {error}"))?;
+        let catalog = catalog.ok_or("Отсутствует архивный каталог nist_csv")?;
+        Some(ThermalReplay::new(
+            &parameters,
+            &catalog,
+            test.safety.max_temperature_age_ms,
+        )?)
+    } else {
+        None
+    };
     let controller = test.controller()?;
     let supervisor = test.supervisor()?;
     Ok(Profile {
         meta,
         controller,
         supervisor,
+        a1,
+        test_only: test,
     })
 }
 
@@ -222,9 +255,9 @@ fn check_hash(name: &str, expected: &str, actual: impl std::fmt::LowerHex) -> Re
     Ok(())
 }
 
-fn verify_references(run: &Path, meta: &Meta) -> Result<(), String> {
+fn verify_references(run: &Path, meta: &Meta, a1: bool) -> Result<Option<String>, String> {
     match (meta.references_status.as_str(), meta.references.is_empty()) {
-        ("not_used", true) => return Ok(()),
+        ("not_used", true) => return Ok(None),
         ("embedded", false) => {}
         _ => return Err("Некорректное описание локальных справочников".into()),
     }
@@ -233,16 +266,25 @@ fn verify_references(run: &Path, meta: &Meta) -> Result<(), String> {
         return Err("Каталог локальных справочников отсутствует или несовместим".into());
     }
     let mut names = HashSet::new();
+    let mut catalog = None;
     for reference in &meta.references {
         if !safe_name(&reference.name) || !names.insert(reference.name.as_str()) {
             return Err("Недопустимое или повторное имя справочника".into());
         }
-        let mut file = open_file(&dir.join(&reference.name))?;
-        let mut hash = Sha256::new();
-        io::copy(&mut file, &mut hash).map_err(|e| format!("Ошибка чтения справочника: {e}"))?;
-        check_hash(&reference.name, &reference.sha256, hash.finalize())?;
+        let path = dir.join(&reference.name);
+        if a1 && reference.name == "nist_csv" {
+            let bytes = header(&path)?;
+            check_hash(&reference.name, &reference.sha256, Sha256::digest(&bytes))?;
+            catalog = Some(String::from_utf8(bytes).map_err(|_| "Каталог nist_csv не в UTF-8")?);
+        } else {
+            let mut file = open_file(&path)?;
+            let mut hash = Sha256::new();
+            io::copy(&mut file, &mut hash)
+                .map_err(|e| format!("Ошибка чтения справочника: {e}"))?;
+            check_hash(&reference.name, &reference.sha256, hash.finalize())?;
+        }
     }
-    Ok(())
+    Ok(catalog)
 }
 
 fn quantities<T: Copy, const N: usize>(

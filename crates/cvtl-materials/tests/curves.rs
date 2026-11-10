@@ -105,6 +105,43 @@ fn nist_fit_checkpoints() {
 }
 
 #[test]
+fn archived_catalog_reuses_the_fit_and_rejects_ambiguous_rows() {
+    use cvtl_materials::{nist_heat_capacity, nist_heat_capacity_from_catalog, MaterialError};
+
+    const CATALOG: &str = include_str!("../../../data/materials/nist.csv");
+    const COPPER: &str = "ofhc_rrr100";
+    let embedded = nist_heat_capacity(COPPER).unwrap().curve;
+    let archived = nist_heat_capacity_from_catalog(COPPER, CATALOG)
+        .unwrap()
+        .curve;
+    for kelvin in [4.0, 20.0, 30.0, 77.0, 250.0] {
+        assert_eq!(
+            archived.value(t(kelvin)).unwrap().get().to_bits(),
+            embedded.value(t(kelvin)).unwrap().get().to_bits()
+        );
+    }
+
+    let altered = "ofhc_rrr100,cp,4,300,0,1,0,0,0,0,0,0,0,0";
+    let curve = nist_heat_capacity_from_catalog(COPPER, altered)
+        .unwrap()
+        .curve;
+    assert_eq!(curve.value(t(77.0)).unwrap().get(), 10.0);
+    assert_ne!(curve.value(t(77.0)), embedded.value(t(77.0)));
+    assert!(matches!(
+        nist_heat_capacity_from_catalog(COPPER, ""),
+        Err(MaterialError::UnavailableProperty)
+    ));
+    assert!(matches!(
+        nist_heat_capacity_from_catalog(COPPER, "ofhc_rrr100,cp,4"),
+        Err(MaterialError::InvalidCurve)
+    ));
+    assert!(matches!(
+        nist_heat_capacity_from_catalog(COPPER, &format!("{altered}\n{altered}\n")),
+        Err(MaterialError::InvalidCurve)
+    ));
+}
+
+#[test]
 fn extreme_finite_curve_does_not_panic_and_has_exact_endpoints() {
     let c = HeatCapacityCurve::new(vec![(t(1.), cp(1e300)), (t(2.), cp(1.5e300))]).unwrap();
     assert_eq!(c.value(t(1.)).unwrap().get(), 1e300);

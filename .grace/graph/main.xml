@@ -5,7 +5,7 @@
       <Path>crates/cvtl-core/src/lib.rs</Path>
     </M-CVTL-CORE>
     <M-CVTL-MATERIALS>
-      <Summary>Кривые теплоёмкости и теплопроводности с проверкой диапазонов.</Summary>
+      <Summary>Кривые теплоёмкости и теплопроводности с проверкой диапазонов. Архивный NIST-каталог разбирается тем же трактом, что встроенный.</Summary>
       <Path>crates/cvtl-materials/src/lib.rs</Path>
       <Links>
         <M-CVTL-CORE />
@@ -85,7 +85,7 @@
       </Links>
     </M-CVTL-DAEMON>
     <M-CVTL-CLI>
-      <Summary>Автономные расчёты wire и heater-advisor, офлайн-реплей RECORDING v1 и импорт исторических данных этапа I.</Summary>
+      <Summary>Автономные расчёты wire и heater-advisor, офлайн-реплей RECORDING v1 и замкнутого A1, импорт исторических данных этапа I.</Summary>
       <Path>crates/cvtl-cli/src/main.rs</Path>
       <Links>
         <M-CVTL-CORE />

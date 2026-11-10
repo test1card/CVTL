@@ -2,7 +2,7 @@
 // VERSION: 0.1.0
 // START_MODULE_CONTRACT
 //   PURPOSE: Recompute a verified recording offline
-//   SCOPE: V1 logical operation, causal evidence and comparison report
+//   SCOPE: Logical operations, causal evidence and comparison report for v1 and A1
 //   DEPENDS: M-CVTL-STORE, M-CVTL-CONTROL, M-CVTL-SAFETY
 //   LINKS: M-CVTL-CLI
 //   ROLE: RUNTIME
@@ -11,8 +11,9 @@
 // START_MODULE_MAP
 //   run - read-only replay command
 // END_MODULE_MAP
-//! Recompute v1 decisions offline and compare them to the verified raw stream.
+//! Recompute decisions offline and compare them to the verified raw stream.
 
+mod a1;
 mod profile;
 
 use std::{path::Path, process::ExitCode, time::Duration};
@@ -20,13 +21,13 @@ use std::{path::Path, process::ExitCode, time::Duration};
 use cvtl_control::{pi::PowerSample, Demand, HeatPermit, Tick, TimedPowerSample};
 use cvtl_core::units::{Amperes, Kelvin, Seconds, Volts, Watts};
 use cvtl_safety::{
-    machine::{MachineState, OffEvidence, OutputState, RequestToken},
+    machine::{MachineError, MachineState, OffEvidence, OutputState, RequestToken},
     monitor::{BranchReading, CoolingPhase, MonitorInput, Temperatures, Warning},
     supervisor::{
         ControlFault, Effect, Equivalence, JournalError, OperatorAction, SafetyJournal,
         SafetyRecord, Supervisor,
     },
-    Branch,
+    Branch, FaultReason,
 };
 use cvtl_store::{
     record::{
@@ -88,6 +89,8 @@ struct Report {
     historical_completion: &'static str,
     output_state_at_boundary: &'static str,
     first_diagnostic: Option<Diagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    a1: Option<a1::Summary>,
 }
 
 pub(super) fn run(dir: &Path) -> Result<(String, ExitCode), String> {
@@ -150,6 +153,7 @@ pub(super) fn run(dir: &Path) -> Result<(String, ExitCode), String> {
         historical_completion: "unknown",
         output_state_at_boundary: output_name(replay.verified_output),
         first_diagnostic: replay.first,
+        a1: replay.profile.a1.map(|thermal| thermal.summary),
     })
     .map(|out| (out, code))
     .map_err(|e| format!("Ошибка формирования отчёта: {e}"))
@@ -194,7 +198,7 @@ impl Replay {
         let op = self
             .operation
             .get_or_insert_with(|| Operation::new(id, row.seq));
-        if let Err(diagnostic) = op.push(row.seq, row.event) {
+        if let Err(diagnostic) = op.push(row.seq, row.event, self.profile.a1.is_some()) {
             self.first = Some(diagnostic);
         } else if terminal_run_record {
             self.flush();
@@ -224,6 +228,7 @@ impl Replay {
             }
         }
         let mut journal = CompareJournal::new(op);
+        let mut thermal_end = None;
         let effect = if let Some(action) = op.operator {
             let input = match action.0 {
                 OperatorAction::Stop => stop_input(action.1),
@@ -234,21 +239,41 @@ impl Replay {
                     .monitor
                     .clone(),
             };
-            let decision = self
+            if let Some(frame) = &op.input {
+                if frame.thermal.is_some_and(|thermal| {
+                    thermal.step.is_some() || !matches!(frame.tick.demand, Demand::Observe)
+                }) {
+                    return Err(
+                        op.mismatch(frame.seq, "Операторские входы A1 должны быть наблюдением")
+                    );
+                }
+            }
+            let decision = match self
                 .profile
                 .supervisor
                 .operate(action.0, &input, &mut journal)
-                .map_err(|_| {
-                    op.mismatch(
+            {
+                Ok(decision) => Some(decision),
+                Err(MachineError::InvalidState)
+                    if self.profile.a1.is_some()
+                        && action.0 == OperatorAction::Start
+                        && self.profile.supervisor.state() == MachineState::OutputOffVerified =>
+                {
+                    op.require_iv_only()?;
+                    None
+                }
+                Err(_) => {
+                    return Err(op.mismatch(
                         op.first,
                         "Операторское действие невозможно в пересчитанном состоянии",
-                    )
-                })?;
+                    ))
+                }
+            };
             journal.finish()?;
             if action.0 == OperatorAction::Reset {
                 self.profile.controller.reset_fault();
             }
-            decision.effect
+            decision.and_then(|decision| decision.effect)
         } else if op.id == Correlation::Run {
             if op.wire.identity.is_none() {
                 return Err(
@@ -273,6 +298,10 @@ impl Replay {
                 .input
                 .as_ref()
                 .ok_or_else(|| op.insufficient("Отсутствуют входы такта"))?;
+            let mut tick = input.tick;
+            if let Some(thermal) = &mut self.profile.a1 {
+                (tick.demand, thermal_end) = thermal.advance(input, op)?;
+            }
             let safety = self
                 .profile
                 .supervisor
@@ -281,7 +310,7 @@ impl Replay {
                 let control = self.profile.supervisor.regulate(
                     input.monitor.monotonic,
                     &mut self.profile.controller,
-                    input.tick,
+                    tick,
                     &mut journal,
                 );
                 (control.effect, control.currents)
@@ -306,6 +335,9 @@ impl Replay {
             op.exact_writes(0)?;
         }
         op.check_output(&self.profile.supervisor, effect.is_some())?;
+        if let (Some(thermal), Some(end)) = (&mut self.profile.a1, thermal_end) {
+            thermal.verify_boundary(end);
+        }
         if let Correlation::Tick(id) = op.id {
             self.replayed += 1;
             self.last_tick = Some(id);
@@ -337,6 +369,29 @@ impl Replay {
                     op.exact_intents(2)?;
                     intent
                 };
+                let lost_now = op.input.as_ref().is_some_and(|frame| {
+                    !frame.monitor.source_connected
+                        && op.wire.source_loss.is_some_and(|(channel, seq)| {
+                            let index = usize::from(channel == Channel::B);
+                            seq < frame.seq && frame.tick.measurements[index].is_none()
+                        })
+                });
+                let stop_before_recovery = self.verified_output == OutputState::Unknown
+                    && op
+                        .operator
+                        .is_some_and(|(action, _)| action == OperatorAction::Stop);
+                if self.profile.a1.is_some()
+                    && !recovering
+                    && op.wire.writes.is_empty()
+                    && supervisor.fault_reason() == Some(FaultReason::SourceLinkLost)
+                    && (lost_now || stop_before_recovery)
+                {
+                    op.require_iv_only()?;
+                    supervisor.proof_unavailable(token).map_err(|_| {
+                        op.mismatch(op.first, "Нет запроса OFF для неподтверждённого выхода")
+                    })?;
+                    return Ok(());
+                }
                 let proof = op.proof_pair([Command::Off; 2], intent)?;
                 if proof
                     .iter()
@@ -381,7 +436,18 @@ impl Replay {
                 }
                 op.exact_writes(4)?;
                 confirm_on(supervisor, token, op)?;
-                self.profile.controller.reset_fault();
+                if let Some(thermal) = &mut self.profile.a1 {
+                    let frame = op
+                        .input
+                        .as_ref()
+                        .ok_or_else(|| op.insufficient("Отсутствуют входы Start A1"))?;
+                    thermal.start(frame, op)?;
+                    self.profile.controller = self.profile.fresh_controller().map_err(|_| {
+                        op.mismatch(op.first, "Невозможно восстановить контроллер A1")
+                    })?;
+                } else {
+                    self.profile.controller.reset_fault();
+                }
             }
         }
         Ok(())
@@ -445,7 +511,7 @@ impl Operation {
         Diagnostic::new(Status::Insufficient, self.first, Some(self.id), message)
     }
 
-    fn push(&mut self, seq: u64, event: Event<'_>) -> Result<(), Diagnostic> {
+    fn push(&mut self, seq: u64, event: Event<'_>, a1: bool) -> Result<(), Diagnostic> {
         self.rows += 1;
         if self.rows > MAX_OPERATION_ROWS {
             return Err(self.insufficient("Превышен предел записей одной операции"));
@@ -462,10 +528,13 @@ impl Operation {
                 {
                     return Err(self.mismatch(seq, "Повторные или запоздалые входы"));
                 }
-                self.input =
-                    Some(Frame::from_raw(frame).map_err(|_| {
-                        self.insufficient("Неподдерживаемые или неполные входы v1")
-                    })?);
+                self.input = Some(Frame::from_raw(seq, frame, a1).map_err(|_| {
+                    self.insufficient(if a1 {
+                        "Неподдерживаемые или неполные входы A1"
+                    } else {
+                        "Неподдерживаемые или неполные входы v1"
+                    })
+                })?);
             }
             Event::Observation { .. } | Event::Control { .. } | Event::Operator { .. } => {
                 if let Event::Operator { action, at_ns } = event {
@@ -567,6 +636,16 @@ impl Operation {
         Ok(())
     }
 
+    fn require_iv_only(&self) -> Result<(), Diagnostic> {
+        if let Some(seq) = self.wire.first_non_iv_dispatch {
+            return Err(self.mismatch(
+                seq,
+                "Посторонняя отправка Keithley без подтверждённого действия",
+            ));
+        }
+        Ok(())
+    }
+
     fn proof_pair(
         &self,
         commands: [Command; 2],
@@ -624,11 +703,17 @@ impl Operation {
 }
 
 struct Frame {
+    seq: u64,
     monitor: MonitorInput,
     tick: Tick,
+    thermal: Option<a1::ThermalInput>,
 }
 impl Frame {
-    fn from_raw(frame: &Inputs<'_>) -> Result<Self, String> {
+    fn measured_ns(&self) -> u64 {
+        self.monitor.monotonic.as_nanos() as u64
+    }
+
+    fn from_raw(seq: u64, frame: &Inputs<'_>, a1: bool) -> Result<Self, String> {
         if frame.power.map(|row| row.channel) != CHANNELS
             || frame.temperatures.map(|row| row.point)
                 != [
@@ -647,10 +732,14 @@ impl Frame {
             "warming" => CoolingPhase::Warming,
             _ => return Err("Неизвестная фаза".into()),
         };
-        let demand = match frame.demand {
-            raw::Demand::Power { requested_w } => {
+        let demand = match (a1, frame.demand) {
+            (false, raw::Demand::Power { requested_w }) => {
                 Demand::Power(quantity(Watts::new(requested_w), "requested_w")?)
             }
+            (true, raw::Demand::VirtualBody { requested_w }) => {
+                Demand::VirtualBody(quantity(Watts::new(requested_w), "requested_w")?)
+            }
+            (true, raw::Demand::Observe) => Demand::Observe,
             _ => return Err("Входной режим вне профиля v1".into()),
         };
         let (a, sample_a) = iv(frame.power[0])?;
@@ -672,6 +761,7 @@ impl Frame {
         };
         let samples = [sample_a, sample_b];
         Ok(Self {
+            seq,
             monitor: MonitorInput {
                 monotonic: now,
                 wall_time_s: quantity(Seconds::new(frame.wall_time_s), "wall_time_s")?,
@@ -696,6 +786,10 @@ impl Frame {
                 now: seconds(now),
                 dt: seconds(Duration::from_nanos(frame.dt_ns)),
             },
+            thermal: a1.then_some(a1::ThermalInput {
+                tf: frame.temperatures[2],
+                step: frame.a1_step_v1,
+            }),
         })
     }
 }
@@ -939,6 +1033,9 @@ struct Wire {
     pending: Option<usize>,
     writes: Vec<WireWrite>,
     replies: Vec<Readback>,
+    first_non_iv_dispatch: Option<u64>,
+    failed_iv_dispatch: Option<Channel>,
+    source_loss: Option<(Channel, u64)>,
 }
 impl Wire {
     fn add(&mut self, seq: u64, event: &Event<'_>) {
@@ -950,6 +1047,11 @@ impl Wire {
                 ..
             } => {
                 self.pending = None;
+                let iv = iv_channel(command);
+                if iv.is_none() {
+                    self.first_non_iv_dispatch.get_or_insert(seq);
+                }
+                self.failed_iv_dispatch = if *status == "unknown" { iv } else { None };
                 let sent = *status == "sent";
                 if let Some(query) = Query::parse(command) {
                     if sent {
@@ -978,6 +1080,14 @@ impl Wire {
                 status,
                 ..
             } => {
+                if let Some(channel) = self.failed_iv_dispatch.take() {
+                    if iv_channel(command) == Some(channel)
+                        && bytes.is_none()
+                        && matches!(*status, "disconnected" | "io" | "timeout")
+                    {
+                        self.source_loss = Some((channel, seq));
+                    }
+                }
                 let Some(index) = self.pending.take() else {
                     return;
                 };
@@ -1050,6 +1160,14 @@ impl Wire {
             sent: issued.row.seq,
             read,
         })
+    }
+}
+
+fn iv_channel(command: &str) -> Option<Channel> {
+    match command {
+        "print(smua.measure.iv())" => Some(Channel::A),
+        "print(smub.measure.iv())" => Some(Channel::B),
+        _ => None,
     }
 }
 
