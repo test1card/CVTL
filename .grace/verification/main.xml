@@ -72,9 +72,11 @@
         <File>crates/cvtl-sim/tests/m5_fault_matrix.rs</File>
         <File>crates/cvtl-sim/tests/m5_tcp_supervisor.rs</File>
         <File>crates/cvtl-sim/tests/m6_recording.rs</File>
+        <File>crates/cvtl-sim/tests/a1_head.rs</File>
       </TestFiles>
       <TraceAssertion>Симуляторы воспроизводят отклик нагрузки и отказы. TCP-сценарии проверяют реакцию и подтверждения OFF.</TraceAssertion>
       <TraceAssertion>В записанном прогоне входы и intent предшествуют отправке. Отказ raw блокирует обе ветви, восстановление требует действий оператора.</TraceAssertion>
+      <TraceAssertion>Синтетический шаг совпадает с численными эталонами. Головка получает фактическое U × I эмулятора, её температуры читаются по соответствующим каналам Lake Shore.</TraceAssertion>
     </V-M-CVTL-SIM>
     <V-M-CVTL-STORE>
       <Command>cargo test --locked -p cvtl-store</Command>

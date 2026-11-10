@@ -1,6 +1,19 @@
+// FILE: crates/cvtl-sim/src/keithley.rs
+// VERSION: 0.1.0
+// START_MODULE_CONTRACT
+//   PURPOSE: Emulate the supported Keithley TSP subset
+//   SCOPE: One state supplies I/V replies and applied heater power
+//   DEPENDS: M-CVTL-CORE, M-CVTL-INSTRUMENTS
+//   LINKS: M-CVTL-SIM
+//   ROLE: RUNTIME
+//   MAP_MODE: EXPORTS
+// END_MODULE_CONTRACT
+// START_MODULE_MAP
+//   KeithleySimulator - loopback source and delivered power snapshot
+// END_MODULE_MAP
 //! Small deterministic TSP subset for offline tests; no hardware access.
 use crate::loopback::{LoopbackServer, Reply};
-use cvtl_core::units::Ohms;
+use cvtl_core::units::{Ohms, Watts};
 use cvtl_instruments::keithley::Channel;
 use std::{
     collections::HashMap,
@@ -39,6 +52,23 @@ struct State {
     disconnect_next_query: bool,
     override_query: Option<(String, Vec<u8>)>,
     query_counts: HashMap<String, usize>,
+}
+
+impl State {
+    fn iv(&self, index: usize) -> (f64, f64) {
+        let fields = &self.fields[index];
+        let on = *fields.get("source.output").unwrap_or(&0.0) == 1.0;
+        let set = *fields.get("source.leveli").unwrap_or(&0.0);
+        let r = self.loads[index];
+        let vlim = *fields.get("source.limitv").unwrap_or(&f64::INFINITY);
+        let plim = *fields.get("source.limitp").unwrap_or(&f64::INFINITY);
+        let current = if on {
+            set.min(vlim / r).min((plim / r).sqrt())
+        } else {
+            0.0
+        };
+        (current, current * r)
+    }
 }
 pub struct KeithleySimulator {
     server: LoopbackServer,
@@ -104,18 +134,8 @@ impl KeithleySimulator {
                     return Reply::Bytes(b"1\n".to_vec());
                 }
                 if rest == "measure.iv()" {
-                    let fields = &s.fields[idx];
-                    let on = *fields.get("source.output").unwrap_or(&0.) == 1.;
-                    let set = *fields.get("source.leveli").unwrap_or(&0.);
-                    let r = s.loads[idx];
-                    let vlim = *fields.get("source.limitv").unwrap_or(&f64::INFINITY);
-                    let plim = *fields.get("source.limitp").unwrap_or(&f64::INFINITY);
-                    let i = if on {
-                        set.min(vlim / r).min((plim / r).sqrt())
-                    } else {
-                        0.
-                    };
-                    return Reply::Bytes(format!("{i:.12e}\t{:.12e}\n", i * r).into_bytes());
+                    let (current, voltage) = s.iv(idx);
+                    return Reply::Bytes(format!("{current:.12e}\t{voltage:.12e}\n").into_bytes());
                 }
                 return Reply::Bytes(
                     format!("{:.12e}\n", s.fields[idx].get(rest).unwrap_or(&0.)).into_bytes(),
@@ -153,6 +173,22 @@ impl KeithleySimulator {
     }
     pub fn addr(&self) -> SocketAddr {
         self.server.addr()
+    }
+
+    /// A/B power applied to the synthetic load in one emulator-state snapshot.
+    pub fn delivered_power(&self) -> io::Result<[Watts; 2]> {
+        let state = self.state.lock().unwrap();
+        let [a, b] = [0, 1].map(|index| {
+            let (current, voltage) = state.iv(index);
+            Watts::new(current * voltage)
+        });
+        match (a, b) {
+            (Some(a), Some(b)) => Ok([a, b]),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "nonfinite simulated power",
+            )),
+        }
     }
     pub fn disconnect_next_query(&self) {
         self.state.lock().unwrap().disconnect_next_query = true;
