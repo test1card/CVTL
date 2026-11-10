@@ -15,9 +15,9 @@
 use std::{fmt::Write, time::Duration};
 
 use cvtl_core::units::{JoulesPerKelvin, Kelvin, Kilograms, Seconds, Watts, WattsPerKelvin};
-use cvtl_materials::{nist_heat_capacity, HeatCapacityCurve};
-use cvtl_physics::{request, Body, Bridge, EmulationMode, PortSample};
-use cvtl_store::record::{A1ChangeV1, A1StepV1, Inputs, Quality, Snapshot};
+use cvtl_materials::nist_heat_capacity;
+use cvtl_physics::{request, scenario::BodySetup, Body, Bridge, EmulationMode, PortSample};
+use cvtl_store::record::{A1ChangeV1, A1StepV1, Inputs, Quality, Snapshot, MAX_RUN_HEADER_BYTES};
 
 use crate::{
     head::{HeadParameters, HeadTemperatures, SyntheticHead},
@@ -25,6 +25,8 @@ use crate::{
 };
 
 pub(super) const SCENARIO: &str = "test_only_a1_loop_v1";
+pub(super) const CONFIGURED_SCENARIO: &str = "test_only_a1_loop_v2";
+const CATALOG: &str = include_str!("../../../data/materials/nist.csv");
 const MATERIAL: &str = "ofhc_rrr100";
 const MASS_KG: f64 = 20.0;
 const BODY_K: f64 = 30.0;
@@ -55,15 +57,16 @@ impl HeldTf {
 }
 
 struct Change {
+    mass: Option<Kilograms>,
     scale: Option<f64>,
     bridge: Option<WattsPerKelvin>,
 }
 
 pub(super) struct A1Scenario {
     body: Body,
-    cp: HeatCapacityCurve,
     bridge: Bridge,
     head: SyntheticHead,
+    allow_mass: bool,
     pending: Option<Change>,
     pub(super) held: Option<HeldTf>,
     pub(super) failed: bool,
@@ -72,21 +75,34 @@ pub(super) struct A1Scenario {
 impl A1Scenario {
     pub(super) fn new() -> Self {
         let cp = nist_heat_capacity(MATERIAL).unwrap().curve;
+        let body = Body::new(
+            cp,
+            Kilograms::new(MASS_KG).unwrap(),
+            INITIAL_SCALE,
+            Kelvin::new(BODY_K).unwrap(),
+        )
+        .unwrap();
+        Self::with_body(
+            body,
+            Bridge::Constant(WattsPerKelvin::new(INITIAL_G).unwrap()),
+            false,
+        )
+    }
+
+    pub(super) fn configured(setup: &BodySetup) -> Result<Self, String> {
+        let (body, bridge) = setup.build(CATALOG, Kelvin::new(HEAD_K[2]).unwrap())?;
+        Ok(Self::with_body(body, bridge, true))
+    }
+
+    fn with_body(body: Body, bridge: Bridge, allow_mass: bool) -> Self {
         let [stage1, stage2, tf] = HEAD_K.map(|t| Kelvin::new(t).unwrap());
         let [stage1_capacity, stage2_capacity, fixture_capacity] =
             CAPACITY_J_PER_K.map(|c| JoulesPerKelvin::new(c).unwrap());
         let [stage_link, fixture_link] =
             HEAD_LINKS_W_PER_K.map(|g| WattsPerKelvin::new(g).unwrap());
         Self {
-            body: Body::new(
-                cp.clone(),
-                mass(),
-                INITIAL_SCALE,
-                Kelvin::new(BODY_K).unwrap(),
-            )
-            .unwrap(),
-            cp,
-            bridge: Bridge::Constant(WattsPerKelvin::new(INITIAL_G).unwrap()),
+            body,
+            bridge,
             head: SyntheticHead::new(
                 HeadParameters {
                     stage1_capacity,
@@ -98,23 +114,50 @@ impl A1Scenario {
                 HeadTemperatures { stage1, stage2, tf },
             )
             .unwrap(),
+            allow_mass,
             pending: None,
             held: None,
             failed: false,
         }
     }
 
-    pub(super) fn snapshot_parameters(snapshot: &mut Snapshot) {
+    pub(super) fn snapshot_parameters(
+        snapshot: &mut Snapshot,
+        setup: Option<&BodySetup>,
+    ) -> Result<(), String> {
+        snapshot
+            .config_yaml
+            .push_str("  a1:\n    synthetic: true\n");
+        if let Some(setup) = setup {
+            let yaml = yaml_serde::to_string(setup)
+                .map_err(|error| format!("Не удалось записать конфигурацию тела A1 ({error})"))?;
+            snapshot.config_yaml.push_str("    setup:\n");
+            for line in yaml.lines() {
+                writeln!(snapshot.config_yaml, "      {line}").unwrap();
+            }
+        } else {
+            write!(
+                snapshot.config_yaml,
+                concat!(
+                    "    material: {}\n    body_mass_kg: {}\n    body_temperature_k: {}\n",
+                    "    scale: {}\n    bridge_w_per_k: {}\n",
+                ),
+                MATERIAL, MASS_KG, BODY_K, INITIAL_SCALE, INITIAL_G
+            )
+            .unwrap();
+        }
         write!(snapshot.config_yaml, concat!(
-            "  a1:\n    synthetic: true\n    material: {}\n    body_mass_kg: {}\n    body_temperature_k: {}\n",
-            "    scale: {}\n    bridge_w_per_k: {}\n    port: tf\n    mode: additional_load\n    body_parasitic_w: 0\n",
+            "    port: tf\n    mode: additional_load\n    body_parasitic_w: 0\n",
             "    head_temperature_k: {:?}\n    head_capacity_j_per_k: {:?}\n    head_links_w_per_k: {:?}\n    jacket_k: {}\n",
-        ), MATERIAL, MASS_KG, BODY_K, INITIAL_SCALE, INITIAL_G, HEAD_K, CAPACITY_J_PER_K,
+        ), HEAD_K, CAPACITY_J_PER_K,
             HEAD_LINKS_W_PER_K, JACKET_K).unwrap();
-        snapshot.references.push((
-            "nist_csv".into(),
-            include_bytes!("../../../data/materials/nist.csv").to_vec(),
-        ));
+        if snapshot.config_yaml.len() > MAX_RUN_HEADER_BYTES {
+            return Err("Снимок настроек A1 превышает допустимый размер".into());
+        }
+        snapshot
+            .references
+            .push(("nist_csv".into(), CATALOG.as_bytes().to_vec()));
+        Ok(())
     }
 
     pub(super) fn temperatures(&self) -> [Kelvin; 8] {
@@ -131,18 +174,36 @@ impl A1Scenario {
 
     pub(super) fn queue_change(
         &mut self,
+        mass: Option<Kilograms>,
         scale: Option<f64>,
         bridge: Option<WattsPerKelvin>,
     ) -> bool {
+        let body_change = mass.is_some() || scale.is_some();
         if self.failed
             || self.pending.is_some()
-            || (scale.is_none() && bridge.is_none())
-            || scale.is_some_and(|s| !(s > 0.0 && s <= 1.0))
-            || bridge.is_some_and(|g| g.get() < 0.0)
+            || (!body_change && bridge.is_none())
+            || (mass.is_some() && !self.allow_mass)
+            || (body_change && self.body.validate_mass_scale(mass, scale).is_err())
         {
             return false;
         }
-        self.pending = Some(Change { scale, bridge });
+        if let Some(g) = bridge {
+            let tf = self
+                .held
+                .map_or_else(|| self.head.temperatures().tf, |held| held.temperature);
+            if !matches!(self.bridge, Bridge::Constant(_))
+                || Bridge::Constant(g)
+                    .flow(self.body.temperature(), tf)
+                    .is_err()
+            {
+                return false;
+            }
+        }
+        self.pending = Some(Change {
+            mass,
+            scale,
+            bridge,
+        });
         true
     }
 
@@ -176,10 +237,10 @@ impl A1Scenario {
         let mut change = None;
         if let Some(next) = self.pending.take() {
             let temperature_before_k = self.body.temperature().get();
-            let dh_event_j = if let Some(scale) = next.scale {
+            let dh_event_j = if next.mass.is_some() || next.scale.is_some() {
                 Some(
                     self.body
-                        .reconfigure(self.cp.clone(), mass(), scale)
+                        .reconfigure_mass_scale(next.mass, next.scale)
                         .ok()?
                         .get(),
                 )
@@ -190,6 +251,7 @@ impl A1Scenario {
                 self.bridge = Bridge::Constant(bridge);
             }
             change = Some(A1ChangeV1 {
+                mass_kg: next.mass.map(Kilograms::get),
                 scale: next.scale,
                 bridge_w_per_k: next.bridge.map(WattsPerKelvin::get),
                 dh_event_j,
@@ -219,10 +281,6 @@ impl A1Scenario {
 fn held_age(read_started_ns: u64, interval_end_ns: u64, max_age: Duration) -> Option<Duration> {
     let age = Duration::from_nanos(interval_end_ns.checked_sub(read_started_ns)?);
     (age <= max_age).then_some(age)
-}
-
-fn mass() -> Kilograms {
-    Kilograms::new(MASS_KG).unwrap()
 }
 
 #[cfg(test)]

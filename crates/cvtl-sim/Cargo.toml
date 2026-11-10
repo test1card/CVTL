@@ -13,3 +13,4 @@ cvtl-materials = { path = "../cvtl-materials" }
 cvtl-physics = { path = "../cvtl-physics" }
 cvtl-safety = { path = "../cvtl-safety" }
 cvtl-store = { path = "../cvtl-store" }
+yaml_serde.workspace = true

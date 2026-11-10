@@ -32,15 +32,17 @@ use cvtl_safety::{
     monitor::{HeadProfile, ProtectionProfile},
     supervisor::Supervisor,
 };
+use cvtl_store::record::MAX_RUN_HEADER_BYTES;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use super::a1::{Parameters, ThermalReplay};
+use super::a1::{ConfiguredParameters, Parameters, ThermalReplay};
 use crate::quantity;
 
-const MAX_HEADER: u64 = 64 * 1024;
+const MAX_HEADER: u64 = MAX_RUN_HEADER_BYTES as u64;
 const PROFILE: &str = "m6_recording_v1";
 const A1_PROFILE: &str = "test_only_a1_loop_v1";
+const CONFIGURED_A1_PROFILE: &str = "test_only_a1_loop_v2";
 
 #[derive(Deserialize)]
 pub(super) struct Meta {
@@ -159,6 +161,7 @@ pub(super) fn load(run: &Path) -> Result<Profile, String> {
     let expected_profile = match meta.scenario.as_str() {
         "test_only_m6_recording_v1" => PROFILE,
         A1_PROFILE => A1_PROFILE,
+        CONFIGURED_A1_PROFILE => CONFIGURED_A1_PROFILE,
         _ => return Err("Несовместимая схема, профиль, версия или идентификатор прогона".into()),
     };
     if meta.schema != cvtl_store::record::SCHEMA
@@ -174,7 +177,7 @@ pub(super) fn load(run: &Path) -> Result<Profile, String> {
         &meta.config_sha256,
         Sha256::digest(&config),
     )?;
-    let catalog = verify_references(run, &meta, expected_profile == A1_PROFILE)?;
+    let catalog = verify_references(run, &meta, expected_profile != PROFILE)?;
     let snapshot: Snapshot =
         yaml_serde::from_slice(&config).map_err(|e| format!("Ошибка снимка YAML: {e}"))?;
     if snapshot.hardware_enabled {
@@ -191,19 +194,23 @@ pub(super) fn load(run: &Path) -> Result<Profile, String> {
     {
         return Err("Неподдерживаемый профиль параметров REPLAY v1".into());
     }
-    let a1 = if expected_profile == A1_PROFILE {
-        let parameters: Parameters = yaml_serde::from_value(
-            test.a1
-                .take()
-                .ok_or("Отсутствуют параметры теплового профиля A1")?,
-        )
-        .map_err(|error| format!("Непригодные параметры теплового профиля A1: {error}"))?;
+    let a1 = if expected_profile != PROFILE {
+        let parameters = test
+            .a1
+            .take()
+            .ok_or("Отсутствуют параметры теплового профиля A1")?;
         let catalog = catalog.ok_or("Отсутствует архивный каталог nist_csv")?;
-        Some(ThermalReplay::new(
-            &parameters,
-            &catalog,
-            test.safety.max_temperature_age_ms,
-        )?)
+        let age = test.safety.max_temperature_age_ms;
+        let invalid = |error| format!("Непригодные параметры теплового профиля A1: {error}");
+        let thermal = if expected_profile == CONFIGURED_A1_PROFILE {
+            let parameters: ConfiguredParameters =
+                yaml_serde::from_value(parameters).map_err(invalid)?;
+            ThermalReplay::configured(&parameters, &catalog, age)?
+        } else {
+            let parameters: Parameters = yaml_serde::from_value(parameters).map_err(invalid)?;
+            ThermalReplay::new(&parameters, &catalog, age)?
+        };
+        Some(thermal)
     } else {
         None
     };

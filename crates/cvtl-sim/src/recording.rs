@@ -29,7 +29,7 @@ use cvtl_control::{
     ControlConfig, Controller, Demand, HeatPermit, Tick, TimedPowerSample,
 };
 use cvtl_core::units::{
-    Amperes, Ohms, PerSecond, Seconds, Volts, Watts, WattsPerKelvin, WattsPerSecond,
+    Amperes, Kilograms, Ohms, PerSecond, Seconds, Volts, Watts, WattsPerKelvin, WattsPerSecond,
 };
 use cvtl_envelope::{ChannelSpec, Margins, ResistanceRange};
 use cvtl_instruments::{
@@ -37,6 +37,7 @@ use cvtl_instruments::{
     lakeshore::{self, LakeShore218, SensorUnit, TemperatureReading, Thermometer},
     InstrumentError, LoopbackTcp, MessageTransport, MAX_FRAME_BYTES,
 };
+use cvtl_physics::scenario::BodySetup;
 use cvtl_safety::{
     machine::{MachineError, MachineState, OffEvidence, OutputState, RequestToken},
     monitor::{BranchReading, CoolingPhase, MonitorInput, ProtectionProfile, Temperatures},
@@ -49,7 +50,7 @@ use cvtl_store::{
 };
 
 use crate::{
-    a1::{A1Scenario, HeldTf, SCENARIO},
+    a1::{A1Scenario, HeldTf, CONFIGURED_SCENARIO, SCENARIO},
     keithley::KeithleySimulator,
     lakeshore::LakeShoreSim,
 };
@@ -76,6 +77,7 @@ pub enum Error {
     Machine(MachineError),
     Instrument(InstrumentError),
     Safety(FaultReason),
+    Scenario(String),
     StaleTick,
 }
 impl From<MachineError> for Error {
@@ -258,12 +260,41 @@ impl<'a> RecordingLoop<'a> {
         path: PathBuf,
         epoch: Instant,
     ) -> Result<Self, Error> {
-        let a1 = A1Scenario::new();
+        Self::new_a1_profile(source, thermometer, run, path, epoch, None)
+    }
+
+    /// Create a test-only session from validated initial body and bridge parameters.
+    pub fn new_a1_configured(
+        source: &'a KeithleySimulator,
+        thermometer: &'a LakeShoreSim,
+        run: &str,
+        path: PathBuf,
+        epoch: Instant,
+        setup: &BodySetup,
+    ) -> Result<Self, Error> {
+        Self::new_a1_profile(source, thermometer, run, path, epoch, Some(setup))
+    }
+
+    fn new_a1_profile(
+        source: &'a KeithleySimulator,
+        thermometer: &'a LakeShoreSim,
+        run: &str,
+        path: PathBuf,
+        epoch: Instant,
+        setup: Option<&BodySetup>,
+    ) -> Result<Self, Error> {
+        let (a1, scenario) = match setup {
+            Some(setup) => (
+                A1Scenario::configured(setup).map_err(Error::Scenario)?,
+                CONFIGURED_SCENARIO,
+            ),
+            None => (A1Scenario::new(), SCENARIO),
+        };
+        let mut snapshot = Self::snapshot_for(scenario, scenario, None);
+        A1Scenario::snapshot_parameters(&mut snapshot, setup).map_err(Error::Scenario)?;
         thermometer
             .set_temperatures(a1.temperatures())
             .map_err(InstrumentError::Io)?;
-        let mut snapshot = Self::snapshot_for(SCENARIO, SCENARIO, None);
-        A1Scenario::snapshot_parameters(&mut snapshot);
         let journal =
             cvtl_store::writer::spawn_file(run, 1, path, snapshot, move || epoch.elapsed())
                 .map_err(Error::Journal)?;
@@ -277,10 +308,19 @@ impl<'a> RecordingLoop<'a> {
         scale: Option<f64>,
         bridge: Option<WattsPerKelvin>,
     ) -> Result<(), Error> {
+        self.change_a1_parameters(None, scale, bridge)
+    }
+
+    pub fn change_a1_parameters(
+        &mut self,
+        mass: Option<Kilograms>,
+        scale: Option<f64>,
+        bridge: Option<WattsPerKelvin>,
+    ) -> Result<(), Error> {
         if self
             .a1
             .as_mut()
-            .is_some_and(|a1| a1.queue_change(scale, bridge))
+            .is_some_and(|a1| a1.queue_change(mass, scale, bridge))
         {
             Ok(())
         } else {

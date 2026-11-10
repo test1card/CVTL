@@ -125,6 +125,7 @@ version = "0.1.0"
 dependencies = [
  "cvtl-core",
  "cvtl-materials",
+ "serde",
 ]
 
 [[package]]
@@ -148,6 +149,7 @@ dependencies = [
  "cvtl-physics",
  "cvtl-safety",
  "cvtl-store",
+ "yaml_serde",
 ]
 
 [[package]]

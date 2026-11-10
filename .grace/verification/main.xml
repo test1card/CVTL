@@ -16,16 +16,18 @@
         <File>crates/cvtl-materials/tests/lakeshore_wire.rs</File>
       </TestFiles>
       <TraceAssertion>Интерполяция и интегрирование сверяются с эталонами и опорными точками источников.</TraceAssertion>
-      <TraceAssertion>Архивный каталог сохраняет числа встроенной кривой при совпадении байтов. Неоднозначная строка отклоняется.</TraceAssertion>
+      <TraceAssertion>Архивный каталог сохраняет числа встроенных cp(T) и k(T) при совпадении байтов. Неоднозначная строка отклоняется.</TraceAssertion>
     </V-M-CVTL-MATERIALS>
     <V-M-CVTL-PHYSICS>
       <Command>cargo test --locked -p cvtl-physics</Command>
       <Scenario>Остывание одноузлового тела, тепловые мосты и потоки по проводке.</Scenario>
       <TestFiles>
         <File>crates/cvtl-physics/tests/physical_references.rs</File>
+        <File>crates/cvtl-physics/tests/scenario.rs</File>
         <File>crates/cvtl-physics/tests/wire_references.rs</File>
       </TestFiles>
       <TraceAssertion>Аналитические эталоны проверяют потоки и энергобаланс, включая dH_event.</TraceAssertion>
+      <TraceAssertion>Четыре типа мостов сравниваются с действующей моделью. Совместная смена массы и scale сохраняет температуру и вычисляет один знаковый dH_event.</TraceAssertion>
     </V-M-CVTL-PHYSICS>
     <V-M-CVTL-ENVELOPE>
       <Command>cargo test --locked -p cvtl-envelope</Command>
@@ -80,6 +82,7 @@
       <TraceAssertion>В записанном прогоне входы и intent предшествуют отправке. Отказ raw блокирует обе ветви, восстановление требует действий оператора.</TraceAssertion>
       <TraceAssertion>Синтетический шаг совпадает с численными эталонами. Головка получает фактическое U × I эмулятора, её температуры читаются по соответствующим каналам Lake Shore.</TraceAssertion>
       <TraceAssertion>Фактическая энергия сохраняется при потере чтения. Замкнутый A1 фиксирует шаг головы, удержанное tf, изменение scale и моста. Просроченное tf блокирует модельный шаг и Drive. Для повторного пуска после потери связи нужны подтверждённый OFF и действия оператора.</TraceAssertion>
+      <TraceAssertion>Номинальный A1 v1 сохраняет сценарий 20 кг и исходный формат снимка. Настраиваемый A1 v2 проходит файловые проверки в CLI.</TraceAssertion>
     </V-M-CVTL-SIM>
     <V-M-CVTL-STORE>
       <Command>cargo test --locked -p cvtl-store</Command>
@@ -90,7 +93,7 @@
         <File>crates/cvtl-store/tests/file_session.rs</File>
       </TestFiles>
       <TraceAssertion>Пакет принимается целиком. Поздний sync не снимает просрочку. При восстановлении выдаются только полные кадры с проверенной контрольной суммой и непрерывным seq.</TraceAssertion>
-      <TraceAssertion>Тепловой блок A1 проходит кодек и проверку чисел. Без него прежняя запись Inputs сохраняет байтовое представление.</TraceAssertion>
+      <TraceAssertion>Тепловой блок A1 проходит кодек и проверку чисел. Смена массы требует dH_event. Прежние записи Inputs сохраняют байтовое представление.</TraceAssertion>
     </V-M-CVTL-STORE>
     <V-M-CVTL-ANALYSIS>
       <Command>cargo test --locked -p cvtl-analysis --test stage_i</Command>
@@ -119,6 +122,7 @@
       <TraceAssertion>Проверяются расчёт проводки, вывод области нагревателя и обработка отсутствующих данных.</TraceAssertion>
       <TraceAssertion>Повторный расчёт сравнивается с сохранёнными решениями. Ошибка кадра и неполный такт различаются, а состояние выхода требует причинно связанных ответов обеих ветвей.</TraceAssertion>
       <TraceAssertion>A1 пересчитывает тепловые шаги, dH и запрос по архивному каталогу и удержанному tf. Потеря источника с Unknown, восстановленный OFF и повторный ручной запуск сверяются по последовательности событий.</TraceAssertion>
+      <TraceAssertion>A1 v2 воспроизводит смену массы, scale и постоянного G. Подмена параметра или использованной кривой k(T) выявляется по пересчёту.</TraceAssertion>
     </V-M-CVTL-CLI>
   </VD-MAIN>
 </GraceVerificationDocument>

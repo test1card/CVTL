@@ -156,3 +156,30 @@ fn extreme_finite_curve_does_not_panic_and_has_exact_endpoints() {
         2.
     );
 }
+
+#[test]
+fn archived_conductivity_uses_the_same_fit() {
+    use cvtl_materials::{nist_conductivity, nist_conductivity_from_catalog, MaterialError};
+
+    const CATALOG: &str = include_str!("../../../data/materials/nist.csv");
+    const COPPER: &str = "ofhc_rrr100";
+    let built_in = nist_conductivity(COPPER).unwrap().curve;
+    let from_archive = nist_conductivity_from_catalog(COPPER, CATALOG)
+        .unwrap()
+        .curve;
+    for kelvin in [4.0, 16.0, 30.0, 77.0, 250.0] {
+        assert_eq!(
+            built_in.value(t(kelvin)).unwrap().get().to_bits(),
+            from_archive.value(t(kelvin)).unwrap().get().to_bits()
+        );
+    }
+    let altered = "ofhc_rrr100,k,4,300,0,1,0,0,0,0,0,0,0,0";
+    let curve = nist_conductivity_from_catalog(COPPER, altered)
+        .unwrap()
+        .curve;
+    near(curve.value(t(16.0)).unwrap().get(), 10.0);
+    assert!(matches!(
+        nist_conductivity_from_catalog(COPPER, ""),
+        Err(MaterialError::UnavailableProperty)
+    ));
+}

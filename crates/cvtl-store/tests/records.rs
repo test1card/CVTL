@@ -150,6 +150,7 @@ fn a1_step_round_trips_without_changing_legacy_inputs() {
         held_tf_age_ns: 101_000_000,
         body_temperature_k: 29.999,
         change: Some(A1ChangeV1 {
+            mass_kg: None,
             scale: Some(0.2),
             bridge_w_per_k: None,
             dh_event_j: Some(3.0),
@@ -161,11 +162,43 @@ fn a1_step_round_trips_without_changing_legacy_inputs() {
     assert!(std::str::from_utf8(&bytes)
         .unwrap()
         .contains("\"a1_step_v1\""));
+    assert!(!std::str::from_utf8(&bytes).unwrap().contains("\"mass_kg\""));
     assert_eq!(decode_line(&bytes).unwrap(), row);
 
     let Event::Inputs { frame } = &mut row.event else {
         unreachable!()
     };
+    let change = frame.a1_step_v1.as_mut().unwrap().change.as_mut().unwrap();
+    change.mass_kg = Some(10.0);
+    change.scale = None;
+    change.dh_event_j = Some(-2.0);
+    let bytes = encode_line(&row).unwrap();
+    assert_eq!(decode_line(&bytes).unwrap(), row);
+
+    let Event::Inputs { frame } = &mut row.event else {
+        unreachable!()
+    };
+    let change = frame.a1_step_v1.as_mut().unwrap().change.as_mut().unwrap();
+    change.mass_kg = Some(0.0);
+    assert!(matches!(encode_line(&row), Err(RecordError::Format)));
+    let Event::Inputs { frame } = &mut row.event else {
+        unreachable!()
+    };
+    let change = frame.a1_step_v1.as_mut().unwrap().change.as_mut().unwrap();
+    change.mass_kg = Some(10.0);
+    change.dh_event_j = None;
+    assert!(matches!(encode_line(&row), Err(RecordError::Format)));
+    let Event::Inputs { frame } = &mut row.event else {
+        unreachable!()
+    };
     frame.a1_step_v1.as_mut().unwrap().interval_ns = 0;
+    frame
+        .a1_step_v1
+        .as_mut()
+        .unwrap()
+        .change
+        .as_mut()
+        .unwrap()
+        .dh_event_j = Some(-2.0);
     assert!(matches!(encode_line(&row), Err(RecordError::Format)));
 }

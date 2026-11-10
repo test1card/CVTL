@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 
 pub const SCHEMA: u16 = 1;
 pub const MAX_RECORD_BYTES: usize = 16 * 1024;
+pub const MAX_RUN_HEADER_BYTES: usize = 64 * 1024;
 pub const MAX_SAFETY_ISSUES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -145,6 +146,8 @@ pub struct A1ChangeV1 {
     pub dh_event_j: Option<f64>,
     pub temperature_before_k: f64,
     pub temperature_after_k: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mass_kg: Option<f64>,
 }
 
 impl A1StepV1 {
@@ -161,10 +164,14 @@ impl A1StepV1 {
 
 impl A1ChangeV1 {
     fn valid(self) -> bool {
-        (self.scale.is_some() || self.bridge_w_per_k.is_some())
+        let body_change = self.mass_kg.is_some() || self.scale.is_some();
+        (body_change || self.bridge_w_per_k.is_some())
+            && self
+                .mass_kg
+                .is_none_or(|mass| mass.is_finite() && mass > 0.0)
             && self.scale.is_none_or(|scale| scale > 0.0 && scale <= 1.0)
             && self.bridge_w_per_k.is_none_or(nonnegative)
-            && self.scale.is_some() == self.dh_event_j.is_some()
+            && body_change == self.dh_event_j.is_some()
             && self.dh_event_j.is_none_or(f64::is_finite)
             && nonnegative(self.temperature_before_k)
             && nonnegative(self.temperature_after_k)

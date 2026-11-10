@@ -1,4 +1,5 @@
 //! Enthalpy model and signed thermal balances, independent of hardware.
+pub mod scenario;
 pub mod wire;
 use cvtl_core::units::*;
 use cvtl_materials::{HeatCapacityCurve, ThermalConductivityCurve};
@@ -142,6 +143,16 @@ impl Body {
         scale: f64,
         temperature: Kelvin,
     ) -> Result<Self> {
+        let h = Self::initial_enthalpy(&cp, mass, scale, temperature)?;
+        Ok(Self { cp, mass, scale, h })
+    }
+
+    fn initial_enthalpy(
+        cp: &HeatCapacityCurve,
+        mass: Kilograms,
+        scale: f64,
+        temperature: Kelvin,
+    ) -> Result<f64> {
         valid_positive(mass.get())?;
         valid_positive(scale)?;
         if scale > 1.0 {
@@ -156,7 +167,7 @@ impl Body {
         }
         // Ensure the public inverse is representable before committing a state.
         material(cp.inverse_integral(unit(JoulesPerKilogram::new(h / effective_mass))?))?;
-        Ok(Self { cp, mass, scale, h })
+        Ok(h)
     }
     pub fn enthalpy(&self) -> Joules {
         Joules::new(self.h).expect("validated enthalpy")
@@ -181,6 +192,33 @@ impl Body {
         let event = unit(Joules::new(replacement.h - self.h))?;
         *self = replacement;
         Ok(event)
+    }
+
+    /// Apply a boundary change while retaining the current material and temperature.
+    pub fn reconfigure_mass_scale(
+        &mut self,
+        mass: Option<Kilograms>,
+        scale: Option<f64>,
+    ) -> Result<Joules> {
+        if mass.is_none() && scale.is_none() {
+            return Ok(Joules::new(0.0).unwrap());
+        }
+        self.reconfigure(
+            self.cp.clone(),
+            mass.unwrap_or(self.mass),
+            scale.unwrap_or(self.scale),
+        )
+    }
+
+    /// Check a proposed change at the current temperature without copying the curve.
+    pub fn validate_mass_scale(&self, mass: Option<Kilograms>, scale: Option<f64>) -> Result<()> {
+        Self::initial_enthalpy(
+            &self.cp,
+            mass.unwrap_or(self.mass),
+            scale.unwrap_or(self.scale),
+            self.temperature(),
+        )?;
+        Ok(())
     }
     fn implicit(
         &self,

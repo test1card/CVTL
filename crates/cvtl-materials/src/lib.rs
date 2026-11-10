@@ -288,7 +288,15 @@ pub fn nist_heat_capacity_from_catalog(
 pub fn nist_conductivity(
     id: &str,
 ) -> Result<SourcedCurve<ThermalConductivityCurve>, MaterialError> {
-    let (curve, provenance) = nist(NIST_CATALOG, id, "k")?;
+    nist_conductivity_from_catalog(id, NIST_CATALOG)
+}
+
+/// Evaluate the conductivity fit preserved with a recording.
+pub fn nist_conductivity_from_catalog(
+    id: &str,
+    catalog: &str,
+) -> Result<SourcedCurve<ThermalConductivityCurve>, MaterialError> {
+    let (curve, provenance) = nist(catalog, id, "k")?;
     Ok(SourcedCurve {
         curve: ThermalConductivityCurve(curve),
         provenance,

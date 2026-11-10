@@ -19,24 +19,52 @@ use std::time::Duration;
 
 use cvtl_control::Demand;
 use cvtl_core::units::{Kelvin, Kilograms, Seconds, Watts, WattsPerKelvin};
-use cvtl_materials::{nist_heat_capacity_from_catalog, HeatCapacityCurve};
-use cvtl_physics::{request, Body, Bridge, EmulationMode, PortSample};
+use cvtl_materials::nist_heat_capacity_from_catalog;
+use cvtl_physics::{request, scenario::BodySetup, Body, Bridge, EmulationMode, PortSample};
 use cvtl_store::record::{A1StepV1, Quality, TemperatureSample};
 use serde::{Deserialize, Serialize};
 
 use super::{Diagnostic, Frame, Operation};
 
 #[derive(Deserialize)]
-pub(super) struct Parameters {
+struct ModeParameters {
     synthetic: bool,
+    port: String,
+    mode: String,
+    body_parasitic_w: f64,
+}
+
+impl ModeParameters {
+    fn validate(&self) -> Result<(), String> {
+        if self.synthetic
+            && self.port == "tf"
+            && self.mode == "additional_load"
+            && self.body_parasitic_w == 0.0
+        {
+            Ok(())
+        } else {
+            Err("Неподдерживаемые параметры теплового профиля A1".into())
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct Parameters {
+    #[serde(flatten)]
+    mode: ModeParameters,
     material: String,
     body_mass_kg: f64,
     body_temperature_k: f64,
     scale: f64,
     bridge_w_per_k: f64,
-    port: String,
-    mode: String,
-    body_parasitic_w: f64,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ConfiguredParameters {
+    #[serde(flatten)]
+    mode: ModeParameters,
+    head_temperature_k: [f64; 3],
+    setup: BodySetup,
 }
 
 #[derive(Clone, Copy)]
@@ -58,10 +86,9 @@ struct Held {
 }
 
 pub(super) struct ThermalReplay {
-    cp: HeatCapacityCurve,
     body: Body,
-    mass: Kilograms,
     bridge: Bridge,
+    allow_mass: bool,
     max_age: Duration,
     held: Option<Held>,
     start_ns: u64,
@@ -75,13 +102,7 @@ impl ThermalReplay {
         max_age_ms: u64,
     ) -> Result<Self, String> {
         let p = parameters;
-        if !p.synthetic
-            || p.port != "tf"
-            || p.mode != "additional_load"
-            || p.body_parasitic_w != 0.0
-        {
-            return Err("Неподдерживаемые параметры теплового профиля A1".into());
-        }
+        p.mode.validate()?;
         let mass = Kilograms::new(p.body_mass_kg).ok_or("Неверная масса тела A1")?;
         let temperature =
             Kelvin::new(p.body_temperature_k).ok_or("Неверная начальная температура тела A1")?;
@@ -91,18 +112,39 @@ impl ThermalReplay {
         let g = WattsPerKelvin::new(p.bridge_w_per_k)
             .filter(|g| g.get() >= 0.0)
             .ok_or("Неверный тепловой мост A1")?;
-        let body = Body::new(cp.clone(), mass, p.scale, temperature)
+        let body = Body::new(cp, mass, p.scale, temperature)
             .map_err(|_| "Непригодные начальные параметры тела A1")?;
-        Ok(Self {
-            cp,
+        Ok(Self::with_body(
             body,
-            mass,
-            bridge: Bridge::Constant(g),
+            Bridge::Constant(g),
+            max_age_ms,
+            false,
+        ))
+    }
+
+    pub(super) fn configured(
+        parameters: &ConfiguredParameters,
+        catalog: &str,
+        max_age_ms: u64,
+    ) -> Result<Self, String> {
+        parameters.mode.validate()?;
+        let tf = Kelvin::new(parameters.head_temperature_k[2]).ok_or("Неверное исходное tf A1")?;
+        let (body, bridge) = parameters.setup.build(catalog, tf).map_err(|error| {
+            format!("Непригодные начальные параметры тела или моста A1 ({error})")
+        })?;
+        Ok(Self::with_body(body, bridge, max_age_ms, true))
+    }
+
+    fn with_body(body: Body, bridge: Bridge, max_age_ms: u64, allow_mass: bool) -> Self {
+        Self {
+            body,
+            bridge,
+            allow_mass,
             max_age: Duration::from_millis(max_age_ms),
             held: None,
             start_ns: 0,
             summary: Summary::default(),
-        })
+        }
     }
 
     pub(super) fn start(&mut self, frame: &Frame, op: &Operation) -> Result<(), Diagnostic> {
@@ -167,15 +209,27 @@ impl ThermalReplay {
             .step(dt, sample, &self.bridge, Watts::new(0.0).unwrap())
             .map_err(|_| op.mismatch(frame.seq, "Не удалось пересчитать тепловой шаг A1"))?;
         if let Some(change) = step.change {
+            if change.mass_kg.is_some() && !self.allow_mass {
+                return Err(op.mismatch(
+                    frame.seq,
+                    "Изменение массы не поддерживается в профиле A1 v1",
+                ));
+            }
+            if change.bridge_w_per_k.is_some() && !matches!(self.bridge, Bridge::Constant(_)) {
+                return Err(op.mismatch(frame.seq, "Изменение G доступно для постоянного моста"));
+            }
             let before = self.body.temperature().get();
             if !same(before, change.temperature_before_k) {
                 return Err(op.mismatch(frame.seq, "Температура до смены параметров A1 отличается"));
             }
-            if let Some(scale) = change.scale {
+            if change.mass_kg.is_some() || change.scale.is_some() {
+                let mass = change.mass_kg.map(|mass| Kilograms::new(mass).unwrap());
                 let dh = self
                     .body
-                    .reconfigure(self.cp.clone(), self.mass, scale)
-                    .map_err(|_| op.mismatch(frame.seq, "Недопустимое изменение scale A1"))?;
+                    .reconfigure_mass_scale(mass, change.scale)
+                    .map_err(|_| {
+                        op.mismatch(frame.seq, "Недопустимое изменение массы или scale A1")
+                    })?;
                 if !change
                     .dh_event_j
                     .is_some_and(|recorded| same(dh.get(), recorded))

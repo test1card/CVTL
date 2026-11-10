@@ -8,7 +8,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cvtl_core::units::WattsPerKelvin;
+use cvtl_core::units::{Kelvin, Kilograms, Seconds, Watts, WattsPerKelvin};
+use cvtl_materials::nist_heat_capacity;
+use cvtl_physics::{
+    scenario::{BodySetup, BridgeSetup},
+    Body, Bridge, PortSample,
+};
 use cvtl_safety::{machine::OutputState, supervisor::OperatorAction};
 use cvtl_sim::{
     keithley::KeithleySimulator,
@@ -16,7 +21,7 @@ use cvtl_sim::{
     recording::{RecordingLoop, PERIOD},
 };
 use cvtl_store::{
-    record::{encode_line, Correlation, Demand, Event, Record},
+    record::{encode_line, A1ChangeV1, A1StepV1, Correlation, Demand, Event, Record},
     recovery::{recover, Tail},
     session::CloseResult,
 };
@@ -29,10 +34,11 @@ enum Scenario {
     Nominal,
     SourceLoss,
     StaleTf,
+    Configured(BodySetup),
 }
 
 impl Run {
-    fn record(scenario: Scenario) -> Self {
+    fn empty() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "cvtl-a1-replay-{}-{}",
@@ -40,16 +46,25 @@ impl Run {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
-        let fixture = Self(root);
+        Self(root)
+    }
+
+    fn record(scenario: Scenario) -> Self {
+        let fixture = Self::empty();
         let source = KeithleySimulator::start().unwrap();
         let lake = LakeShoreSim::spawn().unwrap();
-        let mut owner = RecordingLoop::new_a1(
-            &source,
-            &lake,
-            "a1-replay-fixture",
-            fixture.path(),
-            Instant::now(),
-        )
+        let epoch = Instant::now();
+        let mut owner = match &scenario {
+            Scenario::Configured(setup) => RecordingLoop::new_a1_configured(
+                &source,
+                &lake,
+                "a1-replay-fixture",
+                fixture.path(),
+                epoch,
+                setup,
+            ),
+            _ => RecordingLoop::new_a1(&source, &lake, "a1-replay-fixture", fixture.path(), epoch),
+        }
         .unwrap();
         wait(|| owner.poll().ready);
         owner.recover().unwrap();
@@ -74,12 +89,48 @@ impl Run {
                 assert_eq!(owner.output_state(), OutputState::OffVerified);
             }
             Scenario::Nominal => {
+                assert!(owner
+                    .change_a1_parameters(Kilograms::new(10.0), None, None)
+                    .is_err());
                 owner.change_a1(Some(0.2), None).unwrap();
                 tick(&mut owner).unwrap();
                 owner.change_a1(None, WattsPerKelvin::new(0.04)).unwrap();
                 for _ in 0..3 {
                     tick(&mut owner).unwrap();
                 }
+            }
+            Scenario::Configured(setup) => {
+                assert!(owner.change_a1_parameters(None, None, None).is_err());
+                assert!(owner
+                    .change_a1_parameters(Kilograms::new(0.0), None, None)
+                    .is_err());
+                assert!(owner.change_a1_parameters(None, Some(1.1), None).is_err());
+                assert!(owner
+                    .change_a1_parameters(Kilograms::new(f64::MAX), Some(1.0), None)
+                    .is_err());
+                assert!(owner
+                    .change_a1_parameters(Kilograms::new(f64::from_bits(1)), None, None)
+                    .is_err());
+                assert!(owner
+                    .change_a1_parameters(None, None, WattsPerKelvin::new(f64::MAX))
+                    .is_err());
+                if matches!(setup.bridge, BridgeSetup::Constant { .. }) {
+                    for (mass, scale, g) in [
+                        (Kilograms::new(10.0), None, None),
+                        (None, Some(0.2), None),
+                        (Kilograms::new(16.0), Some(0.15), None),
+                        (None, None, WattsPerKelvin::new(0.04)),
+                    ] {
+                        owner.change_a1_parameters(mass, scale, g).unwrap();
+                        assert!(owner.change_a1_parameters(None, Some(0.3), None).is_err());
+                        assert!(tick(&mut owner).unwrap().command_latency.is_some());
+                    }
+                } else {
+                    assert!(owner
+                        .change_a1_parameters(None, None, WattsPerKelvin::new(0.04))
+                        .is_err());
+                }
+                assert!(tick(&mut owner).unwrap().command_latency.is_some());
             }
         }
         owner.begin_close().unwrap();
@@ -340,4 +391,280 @@ fn catalog_profile_and_tail_diagnostics_are_separate() {
     let output = run.replay();
     assert!(!output.status.success());
     assert_eq!(report(&output)["raw_tail"], "incomplete_frame");
+}
+
+fn configured(bridge: BridgeSetup) -> Scenario {
+    Scenario::Configured(BodySetup {
+        material: "ofhc_rrr100".into(),
+        mass_kg: 20.0,
+        temperature_k: 30.0,
+        scale: 0.1,
+        bridge,
+    })
+}
+
+fn constant() -> Scenario {
+    configured(BridgeSetup::Constant {
+        conductance_w_per_k: 0.02,
+    })
+}
+
+fn thermal_steps(run: &Run) -> Vec<(A1StepV1, f64, f64)> {
+    let mut steps = Vec::new();
+    let result = recover(
+        fs::File::open(run.path().join("raw.ndjson.zst")).unwrap(),
+        |row| {
+            if let Event::Inputs { frame } = row.event {
+                if let (Some(step), Demand::VirtualBody { requested_w }) =
+                    (frame.a1_step_v1, frame.demand)
+                {
+                    steps.push((
+                        step,
+                        requested_w,
+                        frame.temperatures[2].temperature_k.unwrap(),
+                    ));
+                }
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(result.tail, Tail::FrameBoundary);
+    steps
+}
+
+#[test]
+fn configured_mass_scale_and_g_changes_replay_with_signed_enthalpy() {
+    let run = Run::record(constant());
+    let hashes = run.digests();
+    let steps = thermal_steps(&run);
+    assert_eq!(steps.len(), 6);
+    let cp = nist_heat_capacity("ofhc_rrr100").unwrap().curve;
+    let mut prior = (20.0, 0.1);
+    for ((step, _, _), (mass, scale)) in steps[1..4].iter().zip([
+        (Some(10.0), None),
+        (None, Some(0.2)),
+        (Some(16.0), Some(0.15)),
+    ]) {
+        let change = step.change.unwrap();
+        assert_eq!(change.mass_kg, mass);
+        assert_eq!(change.scale, scale);
+        let before = Kelvin::new(change.temperature_before_k).unwrap();
+        let after = change.temperature_after_k;
+        assert!((before.get() - after).abs() <= 1e-6);
+        let current = (mass.unwrap_or(prior.0), scale.unwrap_or(prior.1));
+        let integral = cp.integral(cp.bounds().0, before).unwrap().get();
+        let expected = (current.0 * current.1 - prior.0 * prior.1) * integral;
+        let recorded = change.dh_event_j.unwrap();
+        assert_eq!(recorded.is_sign_negative(), expected.is_sign_negative());
+        assert!((recorded - expected).abs() <= 1e-6);
+        prior = current;
+    }
+    assert_eq!(steps[4].0.change.unwrap().bridge_w_per_k, Some(0.04));
+    assert!(steps[4].0.change.unwrap().dh_event_j.is_none());
+    for (index, (step, request, tf)) in steps.iter().enumerate() {
+        let g = if index < 4 { 0.02 } else { 0.04 };
+        assert!((request - g * (step.body_temperature_k - tf)).abs() <= 1e-12);
+        if let Some(change) = step.change.filter(|change| change.bridge_w_per_k.is_none()) {
+            assert!((request - g * (change.temperature_before_k - tf)).abs() <= g * 1e-6);
+        }
+    }
+
+    let mut old_mass = Body::new(
+        cp,
+        Kilograms::new(20.0).unwrap(),
+        0.1,
+        Kelvin::new(steps[1].0.body_temperature_k).unwrap(),
+    )
+    .unwrap();
+    let following = steps[2].0;
+    old_mass
+        .step(
+            Seconds::new(Duration::from_nanos(following.interval_ns).as_secs_f64()).unwrap(),
+            PortSample {
+                temperature: Kelvin::new(following.held_tf_k).unwrap(),
+                age: Seconds::new(Duration::from_nanos(following.held_tf_age_ns).as_secs_f64())
+                    .unwrap(),
+            },
+            &Bridge::Constant(WattsPerKelvin::new(0.02).unwrap()),
+            Watts::new(0.0).unwrap(),
+        )
+        .unwrap();
+    assert!(
+        (old_mass.temperature().get() - following.change.unwrap().temperature_before_k).abs()
+            > 1e-6
+    );
+
+    let output = run.replay();
+    let result = report(&output);
+    assert!(output.status.success(), "{result}");
+    assert_eq!(result["replayed_ticks"], 6);
+    assert_eq!(result["a1"]["thermal_steps"], 6);
+    assert_eq!(result["output_state_at_boundary"], "off_verified");
+    assert_eq!(run.replay().stdout, output.stdout);
+    assert_eq!(run.digests(), hashes);
+}
+
+#[test]
+fn configured_replay_detects_parameter_substitutions_and_rejects_mass_in_v1() {
+    let run = Run::record(constant());
+    let raw = run.path().join("raw.ndjson.zst");
+    let original = fs::read(&raw).unwrap();
+    for field in 0..3 {
+        let seq = run.alter(|row| {
+            let Event::Inputs { frame } = &mut row.event else {
+                return false;
+            };
+            let Some(change) = frame
+                .a1_step_v1
+                .as_mut()
+                .and_then(|step| step.change.as_mut())
+            else {
+                return false;
+            };
+            let value = match field {
+                0 => &mut change.mass_kg,
+                1 => &mut change.scale,
+                _ => &mut change.bridge_w_per_k,
+            };
+            if let Some(value) = value {
+                *value += 0.01;
+                return true;
+            }
+            false
+        });
+        let out = run.replay();
+        assert!(!out.status.success());
+        let result = report(&out);
+        assert_eq!(result["status"], "mismatch", "{result}");
+        assert_eq!(result["first_diagnostic"]["seq"], seq, "{result}");
+        fs::write(&raw, &original).unwrap();
+    }
+
+    let snapshot = run.path().join("config.snapshot.yaml");
+    let meta_path = run.path().join("meta.json");
+    let mut config: yaml_serde::Value =
+        yaml_serde::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    config["test_only"]["a1"]["setup"]["mass_kg"] = yaml_serde::to_value(22.0).unwrap();
+    let altered = yaml_serde::to_string(&config).unwrap();
+    fs::write(&snapshot, &altered).unwrap();
+    let mut meta: Value = serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    meta["config_sha256"] = format!("{:x}", Sha256::digest(altered.as_bytes())).into();
+    fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    let out = run.replay();
+    assert!(!out.status.success());
+    assert_eq!(report(&out)["status"], "mismatch");
+    meta["scenario"] = "test_only_a1_loop_v1".into();
+    fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    let out = run.replay();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("профиль"));
+
+    let legacy = Run::record(Scenario::Nominal);
+    let seq = legacy.alter(|row| {
+        if let Event::Inputs { frame } = &mut row.event {
+            if let Some(change) = frame
+                .a1_step_v1
+                .as_mut()
+                .and_then(|step| step.change.as_mut())
+            {
+                if change.scale.is_some() {
+                    change.mass_kg = Some(10.0);
+                    return true;
+                }
+            }
+        }
+        false
+    });
+    let out = legacy.replay();
+    assert!(!out.status.success());
+    let result = report(&out);
+    assert_eq!(result["status"], "mismatch", "{result}");
+    assert_eq!(result["first_diagnostic"]["seq"], seq, "{result}");
+}
+
+#[test]
+fn conductor_replay_uses_archived_k_with_matching_digest() {
+    let run = Run::record(configured(BridgeSetup::Conductor {
+        material: "ofhc_rrr100".into(),
+        area_m2: 1e-6,
+        length_m: 0.10,
+    }));
+    let out = run.replay();
+    let result = report(&out);
+    assert!(out.status.success(), "{result}");
+    assert_eq!(result["a1"]["thermal_steps"], 2);
+    assert!(thermal_steps(&run)
+        .iter()
+        .all(|(step, _, _)| step.change.is_none()));
+
+    let raw = run.path().join("raw.ndjson.zst");
+    let original_raw = fs::read(&raw).unwrap();
+    let seq = run.alter(|row| {
+        let Event::Inputs { frame } = &mut row.event else {
+            return false;
+        };
+        let Some(step) = &mut frame.a1_step_v1 else {
+            return false;
+        };
+        step.change = Some(A1ChangeV1 {
+            mass_kg: None,
+            scale: None,
+            bridge_w_per_k: Some(0.04),
+            dh_event_j: None,
+            temperature_before_k: step.body_temperature_k,
+            temperature_after_k: step.body_temperature_k,
+        });
+        true
+    });
+    let out = run.replay();
+    assert!(!out.status.success());
+    assert_eq!(report(&out)["first_diagnostic"]["seq"], seq);
+    fs::write(&raw, original_raw).unwrap();
+    let catalog = run.path().join("references/nist_csv");
+    let original = fs::read_to_string(&catalog).unwrap();
+    let row = original
+        .lines()
+        .find(|row| row.starts_with("ofhc_rrr100,k,"))
+        .unwrap();
+    let altered = original.replace(row, "ofhc_rrr100,k,4,300,0,1,0,0,0,0,0,0,0,0");
+    fs::write(&catalog, &altered).unwrap();
+    let meta_path = run.path().join("meta.json");
+    let mut meta: Value = serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+    meta["references"][0]["sha256"] = format!("{:x}", Sha256::digest(altered.as_bytes())).into();
+    fs::write(meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    let out = run.replay();
+    assert!(!out.status.success());
+    assert_eq!(report(&out)["status"], "mismatch");
+}
+
+#[test]
+fn unreplayable_setup_is_rejected_before_creating_the_run() {
+    let source = KeithleySimulator::start().unwrap();
+    let lake = LakeShoreSim::spawn().unwrap();
+    let run = Run::empty();
+    let Scenario::Configured(mut setup) = configured(BridgeSetup::Table {
+        points: (0..8000)
+            .map(|i| [4.0 + f64::from(i) * 0.01, 0.02])
+            .collect(),
+    }) else {
+        unreachable!()
+    };
+    let create = |setup: &BodySetup| {
+        RecordingLoop::new_a1_configured(
+            &source,
+            &lake,
+            "invalid",
+            run.path(),
+            Instant::now(),
+            setup,
+        )
+    };
+    assert!(create(&setup).is_err());
+    assert!(!run.path().exists());
+    setup.bridge = BridgeSetup::Constant {
+        conductance_w_per_k: 0.02,
+    };
+    setup.mass_kg = 0.0;
+    assert!(create(&setup).is_err());
+    assert!(!run.path().exists());
 }
