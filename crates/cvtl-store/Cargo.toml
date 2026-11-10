@@ -3,3 +3,11 @@ name = "cvtl-store"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+cvtl-safety = { path = "../cvtl-safety" }
+rtrb = "0.4.1"
+serde.workspace = true
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"
+zstd = "0.13"

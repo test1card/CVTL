@@ -1,11 +1,27 @@
+// FILE: crates/cvtl-safety/src/supervisor.rs
+// VERSION: 0.1.0
+// START_MODULE_CONTRACT
+//   PURPOSE: Gate M4 and ON with M5 and journal health
+//   SCOPE: Observations, operator actions, regulation and OFF effects
+//   DEPENDS: M-CVTL-CONTROL, M-CVTL-CORE
+//   LINKS: M-CVTL-SAFETY
+//   ROLE: RUNTIME
+//   MAP_MODE: EXPORTS
+// END_MODULE_CONTRACT
+// START_MODULE_MAP
+//   Supervisor - single-use permits and M5 effects
+//   SafetyJournal - bounded synchronous handoff contract
+//   SafetyRecord - borrowed safety and control telemetry
+//   Effect - ON and OFF requests carrying opaque tokens
+// END_MODULE_MAP
 //! M5 gate between observations, M4 control and actuator effects.
 //! The journal implementation and the device connection belong to the caller.
 
 use std::time::Duration;
 
-use cvtl_control::{
-    Actuation, ControlOutput, Controller, Fault as ControlFault, HeatPermit, Tick,
-    Warning as ControlWarning,
+use cvtl_control::{Actuation, Controller, HeatPermit, Tick};
+pub use cvtl_control::{
+    ControlOutput, Equivalence, Fault as ControlFault, Warning as ControlWarning,
 };
 use cvtl_core::units::{Amperes, Watts};
 
@@ -47,6 +63,7 @@ pub enum SafetyRecord<'a> {
         at: Duration,
         warning: Option<ControlWarning>,
         fault: Option<ControlFault>,
+        output: &'a ControlOutput,
     },
 }
 
@@ -162,6 +179,11 @@ impl Supervisor {
     pub fn proof_unavailable(&mut self, request: RequestToken) -> Result<(), MachineError> {
         self.authorized = None;
         self.machine.proof_unavailable(request)
+    }
+
+    /// Invalidate a pending permit when asynchronous journal health is lost.
+    pub fn journal_failed(&mut self) -> Option<Effect> {
+        self.trip(FaultReason::JournalFailure)
     }
 
     pub fn observe(
@@ -289,6 +311,7 @@ impl Supervisor {
             at,
             warning: output.warning,
             fault: output.fault,
+            output: &output,
         });
         if let Some(fault) = output.fault {
             return ControlDecision {

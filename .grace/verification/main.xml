@@ -52,6 +52,7 @@
         <File>crates/cvtl-safety/tests/supervisor.rs</File>
       </TestFiles>
       <TraceAssertion>Нагрев требует допуска. Обе ветви подтверждают OFF в текущем сеансе. Ошибка журнала запрещает выдачу тока.</TraceAssertion>
+      <TraceAssertion>Асинхронный отказ журнала аннулирует частично исполненный запрос ON и сохраняет полученный токен OFF.</TraceAssertion>
     </V-M-CVTL-SAFETY>
     <V-M-CVTL-INSTRUMENTS>
       <Command>cargo test --locked -p cvtl-instruments</Command>
@@ -70,13 +71,20 @@
         <File>crates/cvtl-sim/tests/lakeshore_protocol.rs</File>
         <File>crates/cvtl-sim/tests/m5_fault_matrix.rs</File>
         <File>crates/cvtl-sim/tests/m5_tcp_supervisor.rs</File>
+        <File>crates/cvtl-sim/tests/m6_recording.rs</File>
       </TestFiles>
       <TraceAssertion>Симуляторы воспроизводят отклик нагрузки и отказы. TCP-сценарии проверяют реакцию и подтверждения OFF.</TraceAssertion>
+      <TraceAssertion>В записанном прогоне входы и intent предшествуют отправке. Отказ raw блокирует обе ветви, восстановление требует действий оператора.</TraceAssertion>
     </V-M-CVTL-SIM>
     <V-M-CVTL-STORE>
-      <Command>cargo metadata --locked --no-deps --format-version 1</Command>
-      <Scenario>Получение Cargo metadata в JSON для ручной проверки зарезервированного крейта и зависимостей workspace.</Scenario>
-      <TraceAssertion>Успешный запуск подтверждает получение metadata. Наличие cvtl-store и направления зависимостей проверяются по содержимому JSON отдельно. Файловые проверки запланированы в RECORDING.</TraceAssertion>
+      <Command>cargo test --locked -p cvtl-store</Command>
+      <Scenario>Формат raw, границы памяти, дедлайны на управляемых часах, файловые отказы и восстановление.</Scenario>
+      <TestFiles>
+        <File>crates/cvtl-store/tests/records.rs</File>
+        <File>crates/cvtl-store/tests/session.rs</File>
+        <File>crates/cvtl-store/tests/file_session.rs</File>
+      </TestFiles>
+      <TraceAssertion>Пакет принимается целиком. Поздний sync не снимает просрочку. При восстановлении выдаются только полные кадры с проверенной контрольной суммой и непрерывным seq.</TraceAssertion>
     </V-M-CVTL-STORE>
     <V-M-CVTL-DAEMON>
       <Command>cargo run --locked -p cvtl-daemon -- config/simulator.yaml</Command>

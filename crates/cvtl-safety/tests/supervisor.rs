@@ -301,3 +301,33 @@ fn inconsistent_controller_limits_cannot_release_a_drive_command() {
         Some(FaultReason::BranchCurrent(Branch::A))
     );
 }
+
+#[test]
+fn asynchronous_journal_fault_invalidates_pending_enable_and_preserves_off() {
+    let mut s = off_verified();
+    let mut journal = Journal::default();
+    s.operate(OperatorAction::Arm, &frame(0), &mut journal)
+        .unwrap();
+    let start = s
+        .operate(OperatorAction::Start, &frame(1), &mut journal)
+        .unwrap();
+    let Some(Effect::EnableBoth(on)) = start.effect else {
+        panic!("ON");
+    };
+    s.confirm_on(on, Branch::A).unwrap();
+    let Some(Effect::DisableBoth(off)) = s.journal_failed() else {
+        panic!("OFF");
+    };
+    assert!(!s.can_enable(on));
+    assert_eq!(s.journal_failed(), None);
+    assert!(s.confirm_on(on, Branch::B).is_err());
+    for branch in Branch::ALL {
+        s.confirm_off(off, branch, OffEvidence::ReportedOff)
+            .unwrap();
+    }
+    assert_eq!(s.fault_reason(), Some(FaultReason::JournalFailure));
+    assert_eq!(
+        s.output_state(),
+        cvtl_safety::machine::OutputState::OffVerified
+    );
+}

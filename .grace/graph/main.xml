@@ -35,7 +35,7 @@
       </Links>
     </M-CVTL-CONTROL>
     <M-CVTL-SAFETY>
-      <Summary>Монитор, автомат, супервизор M5 и контракт передачи SafetyJournal. См. ADR 0008.</Summary>
+      <Summary>Монитор, автомат и супервизор M5. SafetyJournal передаёт записи, journal_failed аннулирует допуск и выдаёт действующий эффект OFF при отказе файлового тракта. См. ADR 0008.</Summary>
       <Path>crates/cvtl-safety/src/lib.rs</Path>
       <Links>
         <M-CVTL-CORE />
@@ -50,16 +50,23 @@
       </Links>
     </M-CVTL-INSTRUMENTS>
     <M-CVTL-SIM>
-      <Summary>Симуляторы приборов и нагрузки. В тестах подключаются control, envelope и safety.</Summary>
+      <Summary>Симуляторы приборов и нагрузки. Последовательный владелец RECORDING соединяет локальные протоколы, защиты M5 и файловый журнал. ON/Drive ждут приёма входов и намерения.</Summary>
       <Path>crates/cvtl-sim/src/lib.rs</Path>
       <Links>
         <M-CVTL-CORE />
         <M-CVTL-INSTRUMENTS />
+        <M-CVTL-CONTROL />
+        <M-CVTL-ENVELOPE />
+        <M-CVTL-SAFETY />
+        <M-CVTL-STORE />
       </Links>
     </M-CVTL-SIM>
     <M-CVTL-STORE>
-      <Summary>Зарезервированный крейт. Файловый writer, реплей и интеграция с safety запланированы в M6.</Summary>
+      <Summary>Запись raw с атомарным приёмом пакетов, отдельным writer-ом, контролем подтверждённых префиксов и чтением проверенных кадров. Реализует передачу SafetyJournal без дискового I/O в контуре. Реплей запланирован отдельным пакетом.</Summary>
       <Path>crates/cvtl-store/src/lib.rs</Path>
+      <Links>
+        <M-CVTL-SAFETY />
+      </Links>
     </M-CVTL-STORE>
     <M-CVTL-DAEMON>
       <Summary>Точка запуска валидирует конфигурацию и завершается.</Summary>

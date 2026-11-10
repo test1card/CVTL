@@ -4,3 +4,4 @@ pub mod keithley;
 pub mod lakeshore;
 mod loopback;
 pub mod power_loop;
+pub mod recording;
