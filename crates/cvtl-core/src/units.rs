@@ -1,4 +1,4 @@
-//! SI quantities exchanged between the thermal model and material curves.
+//! SI quantities exchanged between the calculation modules.
 //!
 //! These types require finite values. Context-specific constraints such as positive
 //! mass and the temperature interval of a material belong to the model.
@@ -25,6 +25,10 @@ quantity!(Kelvin, "Temperature in K.");
 quantity!(Kilograms, "Mass in kg.");
 quantity!(Joules, "Energy in J.");
 quantity!(Watts, "Power or signed heat flow in W.");
+quantity!(Amperes, "Current in A.");
+quantity!(Volts, "Voltage in V.");
+quantity!(Ohms, "Resistance in Ω.");
+quantity!(OhmMeters, "Electrical resistivity in Ω·m.");
 quantity!(Seconds, "Time interval in s.");
 quantity!(Meters, "Length in m.");
 quantity!(SquareMeters, "Area in m².");

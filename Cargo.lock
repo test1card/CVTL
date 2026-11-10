@@ -9,6 +9,14 @@ version = "0.1.0"
 [[package]]
 name = "cvtl-cli"
 version = "0.1.0"
+dependencies = [
+ "cvtl-core",
+ "cvtl-envelope",
+ "cvtl-materials",
+ "cvtl-physics",
+ "serde",
+ "yaml_serde",
+]
 
 [[package]]
 name = "cvtl-control"
@@ -32,6 +40,9 @@ dependencies = [
 [[package]]
 name = "cvtl-envelope"
 version = "0.1.0"
+dependencies = [
+ "cvtl-core",
+]
 
 [[package]]
 name = "cvtl-instruments"

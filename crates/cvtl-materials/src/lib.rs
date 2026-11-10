@@ -3,6 +3,9 @@ use cvtl_core::units::{
     JoulesPerKilogram, JoulesPerKilogramKelvin, Kelvin, WattsPerMeter, WattsPerMeterKelvin,
 };
 
+mod lakeshore;
+pub use lakeshore::{lakeshore_wire_conductivity, LAKESHORE_WIRE_SOURCE};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaterialError {
     InvalidCurve,
@@ -154,6 +157,17 @@ impl ThermalConductivityCurve {
     pub fn bounds(&self) -> (Kelvin, Kelvin) {
         let (a, b) = self.0.bounds();
         (Kelvin::new(a).unwrap(), Kelvin::new(b).unwrap())
+    }
+
+    /// Scales the conductivity while preserving the original temperature knots.
+    pub fn scaled(&self, factor: f64) -> Result<Self, MaterialError> {
+        let points = self
+            .0
+            .points
+            .iter()
+            .map(|&(t, k)| (t, k * factor))
+            .collect();
+        Ok(Self(Curve::new(points)?))
     }
 }
 

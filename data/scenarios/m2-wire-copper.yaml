@@ -1,0 +1,12 @@
+schema_version: 1
+terminals:
+  jacket: 77.0
+  stage2: 4.2
+segments:
+  - from: jacket
+    to: stage2
+    material: lakeshore_copper
+    area_mm2: 0.12
+    length_m: 0.30
+    strands: 2
+    current_a: 0.0

@@ -1,0 +1,15 @@
+schema_version: 1
+voltage_factor: 0.9
+current_factor: 0.9
+total_limit_w: null
+candidates:
+  - label: 25 Ом
+    channel_a: {resistance_ohm: [25, 25], loop_resistance_ohm: 0, heater_limit_w: null}
+  - label: 40 Ом
+    channel_a: {resistance_ohm: [40, 40], loop_resistance_ohm: 0, heater_limit_w: null}
+  - label: 50 Ом
+    channel_a: {resistance_ohm: [50, 50], loop_resistance_ohm: 0, heater_limit_w: null}
+  - label: 75 Ом
+    channel_a: {resistance_ohm: [75, 75], loop_resistance_ohm: 0, heater_limit_w: null}
+  - label: 150 Ом
+    channel_a: {resistance_ohm: [150, 150], loop_resistance_ohm: 0, heater_limit_w: null}

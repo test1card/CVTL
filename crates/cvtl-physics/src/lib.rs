@@ -1,4 +1,5 @@
 //! Enthalpy model and signed thermal balances, independent of hardware.
+pub mod wire;
 use cvtl_core::units::*;
 use cvtl_materials::{HeatCapacityCurve, ThermalConductivityCurve};
 

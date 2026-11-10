@@ -3,3 +3,11 @@ name = "cvtl-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+cvtl-core = { path = "../cvtl-core" }
+cvtl-envelope = { path = "../cvtl-envelope" }
+cvtl-materials = { path = "../cvtl-materials" }
+cvtl-physics = { path = "../cvtl-physics" }
+serde.workspace = true
+yaml_serde.workspace = true

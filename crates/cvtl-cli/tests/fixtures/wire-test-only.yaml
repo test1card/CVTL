@@ -1,0 +1,23 @@
+# test_only. The current and resistivity are synthetic inputs to a calculation.
+schema_version: 1
+terminals: {room: 80, jacket: 77, stage2: 4.2}
+segments:
+  - from: room
+    to: jacket
+    material: lakeshore_copper
+    diameter_mm: 0.2
+    length_m: 0.30
+    strands: 1
+    current_a: 0
+    uncertainty: {k_relative: 0.1, length_relative: 0.1}
+  - from: jacket
+    to: stage2
+    material: lakeshore_copper
+    area_mm2: 0.12
+    length_m: 0.30
+    strands: 1
+    current_a: 0.1
+    resistivity:
+      source: test_only
+      table: [[1, 1.0e-8], [300, 1.0e-8]]
+    uncertainty: {k_relative: 0.1, length_relative: 0.1}
