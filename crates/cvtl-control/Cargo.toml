@@ -3,3 +3,7 @@ name = "cvtl-control"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[dependencies]
+cvtl-core = { path = "../cvtl-core" }
+cvtl-envelope = { path = "../cvtl-envelope" }

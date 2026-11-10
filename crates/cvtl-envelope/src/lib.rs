@@ -46,6 +46,10 @@ impl ResistanceRange {
             Err(EnvelopeError)
         }
     }
+
+    pub fn bounds(self) -> (Ohms, Ohms) {
+        (self.min, self.max)
+    }
 }
 #[derive(Debug, Clone, Copy)]
 pub struct ChannelSpec {

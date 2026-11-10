@@ -19,6 +19,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo run --locked -p cvtl-daemon -- config/simulator.yaml
+      - run: cargo run --release --locked -p cvtl-sim --example m4_timing
   gui:
     runs-on: ubuntu-22.04
     defaults:

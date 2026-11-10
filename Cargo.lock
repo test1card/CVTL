@@ -21,6 +21,10 @@ dependencies = [
 [[package]]
 name = "cvtl-control"
 version = "0.1.0"
+dependencies = [
+ "cvtl-core",
+ "cvtl-envelope",
+]
 
 [[package]]
 name = "cvtl-core"
@@ -74,7 +78,9 @@ version = "0.1.0"
 name = "cvtl-sim"
 version = "0.1.0"
 dependencies = [
+ "cvtl-control",
  "cvtl-core",
+ "cvtl-envelope",
  "cvtl-instruments",
 ]
 

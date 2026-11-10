@@ -25,14 +25,20 @@ quantity!(Kelvin, "Temperature in K.");
 quantity!(Kilograms, "Mass in kg.");
 quantity!(Joules, "Energy in J.");
 quantity!(Watts, "Power or signed heat flow in W.");
+quantity!(WattsPerSecond, "Power ramp rate in W/s.");
 quantity!(Amperes, "Current in A.");
 quantity!(Volts, "Voltage in V.");
 quantity!(Ohms, "Resistance in Ω.");
 quantity!(OhmMeters, "Electrical resistivity in Ω·m.");
 quantity!(Seconds, "Time interval in s.");
+quantity!(PerSecond, "Rate in s⁻¹.");
 quantity!(Meters, "Length in m.");
 quantity!(SquareMeters, "Area in m².");
 quantity!(WattsPerKelvin, "Thermal conductance in W/K.");
+quantity!(
+    WattsPerKelvinSecond,
+    "Temperature integral gain in W/(K·s)."
+);
 quantity!(KelvinPerSecond, "Temperature rate in K/s.");
 quantity!(JoulesPerKelvin, "Heat capacity in J/K.");
 quantity!(JoulesPerKilogram, "Specific enthalpy in J/kg.");

@@ -87,6 +87,7 @@ pub fn parse_number(bytes: &[u8]) -> Result<f64> {
     Ok(x)
 }
 /// `measure.iv()` returns current first, then voltage (Rev. F p. 9-233); print uses tabs (p. 9-170).
+/// The M3 wire profile requires unpadded fields. Firmware compatibility is a Phase B check.
 pub fn parse_iv(bytes: &[u8]) -> Result<(f64, f64)> {
     let s =
         std::str::from_utf8(bytes).map_err(|_| InstrumentError::InvalidResponse("non-UTF-8 IV"))?;

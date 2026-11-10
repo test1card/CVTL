@@ -7,3 +7,7 @@ rust-version.workspace = true
 [dependencies]
 cvtl-core = { path = "../cvtl-core" }
 cvtl-instruments = { path = "../cvtl-instruments" }
+
+[dev-dependencies]
+cvtl-control = { path = "../cvtl-control" }
+cvtl-envelope = { path = "../cvtl-envelope" }
