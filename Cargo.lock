@@ -144,6 +144,8 @@ dependencies = [
  "cvtl-core",
  "cvtl-envelope",
  "cvtl-instruments",
+ "cvtl-materials",
+ "cvtl-physics",
  "cvtl-safety",
  "cvtl-store",
 ]

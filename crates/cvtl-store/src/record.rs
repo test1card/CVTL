@@ -11,6 +11,7 @@
 // START_MODULE_MAP
 //   Record - versioned raw envelope
 //   Event - typed raw payload
+//   A1StepV1 - optional thermal step evidence for the A1 scenario
 //   encode_line - serialize one bounded line
 //   decode_line - validate a complete line
 //   Snapshot - applied configuration and reference bytes
@@ -122,6 +123,56 @@ pub struct Inputs<'a> {
     pub model_valid: bool,
     pub journal_ok: bool,
     pub cooling_phase: &'a str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a1_step_v1: Option<A1StepV1>,
+}
+
+/// A1 scenario extension. Absence preserves the original v1 Inputs encoding.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct A1StepV1 {
+    pub interval_ns: u64,
+    pub heater_energy_j: [f64; 2],
+    pub held_tf_k: f64,
+    pub held_tf_age_ns: u64,
+    pub body_temperature_k: f64,
+    pub change: Option<A1ChangeV1>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct A1ChangeV1 {
+    pub scale: Option<f64>,
+    pub bridge_w_per_k: Option<f64>,
+    pub dh_event_j: Option<f64>,
+    pub temperature_before_k: f64,
+    pub temperature_after_k: f64,
+}
+
+impl A1StepV1 {
+    fn valid(self) -> bool {
+        self.interval_ns > 0
+            && self.heater_energy_j.into_iter().all(nonnegative)
+            && nonnegative(self.held_tf_k)
+            && self.held_tf_k > 0.0
+            && nonnegative(self.body_temperature_k)
+            && self.body_temperature_k > 0.0
+            && self.change.is_none_or(A1ChangeV1::valid)
+    }
+}
+
+impl A1ChangeV1 {
+    fn valid(self) -> bool {
+        (self.scale.is_some() || self.bridge_w_per_k.is_some())
+            && self.scale.is_none_or(|scale| scale > 0.0 && scale <= 1.0)
+            && self.bridge_w_per_k.is_none_or(nonnegative)
+            && self.scale.is_some() == self.dh_event_j.is_some()
+            && self.dh_event_j.is_none_or(f64::is_finite)
+            && nonnegative(self.temperature_before_k)
+            && nonnegative(self.temperature_after_k)
+    }
+}
+
+fn nonnegative(value: f64) -> bool {
+    value.is_finite() && value >= 0.0
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -236,6 +287,12 @@ impl Event<'_> {
                 };
                 stable_tag(frame.cooling_phase)
                     && demand
+                    && frame.a1_step_v1.is_none_or(|step| {
+                        step.valid()
+                            && (matches!(frame.demand, Demand::VirtualBody { .. })
+                                || !frame.thermometer_connected
+                                    && matches!(frame.demand, Demand::Observe))
+                    })
                     && frame.wall_time_s.is_finite()
                     && frame.power.iter().all(|sample| {
                         [sample.current_a, sample.voltage_v, sample.target_w]

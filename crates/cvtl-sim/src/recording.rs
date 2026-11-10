@@ -2,7 +2,7 @@
 // VERSION: 0.1.0
 // START_MODULE_CONTRACT
 //   PURPOSE: Run one offline recording owner
-//   SCOPE: Loopback only, M5 permits, raw evidence and independent OFF
+//   SCOPE: Loopback scenarios, M5 permits, raw evidence and independent OFF
 //   DEPENDS: M-CVTL-STORE, M-CVTL-SAFETY, M-CVTL-INSTRUMENTS, M-CVTL-CONTROL
 //   LINKS: M-CVTL-SIM
 //   ROLE: RUNTIME
@@ -18,6 +18,7 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
+    path::PathBuf,
     rc::Rc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -27,7 +28,9 @@ use cvtl_control::{
     pi::{PiConfig, PowerSample},
     ControlConfig, Controller, Demand, HeatPermit, Tick, TimedPowerSample,
 };
-use cvtl_core::units::{Amperes, Ohms, PerSecond, Seconds, Volts, Watts, WattsPerSecond};
+use cvtl_core::units::{
+    Amperes, Ohms, PerSecond, Seconds, Volts, Watts, WattsPerKelvin, WattsPerSecond,
+};
 use cvtl_envelope::{ChannelSpec, Margins, ResistanceRange};
 use cvtl_instruments::{
     keithley::{Channel, ChannelConfig, Keithley, SourceChannel},
@@ -45,7 +48,11 @@ use cvtl_store::{
     session::{fault_issue, CloseResult, Failure, Receipt, Session, Status},
 };
 
-use crate::{keithley::KeithleySimulator, lakeshore::LakeShoreSim};
+use crate::{
+    a1::{A1Scenario, HeldTf, SCENARIO},
+    keithley::KeithleySimulator,
+    lakeshore::LakeShoreSim,
+};
 
 pub const PERIOD: Duration = Duration::from_millis(100);
 const COMMAND_LIMIT: Duration = Duration::from_millis(250);
@@ -206,6 +213,7 @@ pub struct RecordingLoop<'a> {
     last_control: Option<Duration>,
     currents: [Amperes; 2],
     targets_w: [f64; 2],
+    a1: Option<A1Scenario>,
 }
 
 impl<'a> RecordingLoop<'a> {
@@ -231,10 +239,56 @@ impl<'a> RecordingLoop<'a> {
             last_control: None,
             currents: [a(0.0); 2],
             targets_w: [0.0; 2],
+            a1: None,
         }
     }
 
     pub fn snapshot() -> Snapshot {
+        Self::snapshot_for(
+            "test_only_m6_recording_v1",
+            "m6_recording_v1",
+            Some(DEMAND_W),
+        )
+    }
+
+    pub fn new_a1(
+        source: &'a KeithleySimulator,
+        thermometer: &'a LakeShoreSim,
+        run: &str,
+        path: PathBuf,
+        epoch: Instant,
+    ) -> Result<Self, Error> {
+        let a1 = A1Scenario::new();
+        thermometer
+            .set_temperatures(a1.temperatures())
+            .map_err(InstrumentError::Io)?;
+        let mut snapshot = Self::snapshot_for(SCENARIO, SCENARIO, None);
+        A1Scenario::snapshot_parameters(&mut snapshot);
+        let journal =
+            cvtl_store::writer::spawn_file(run, 1, path, snapshot, move || epoch.elapsed())
+                .map_err(Error::Journal)?;
+        let mut owner = Self::new(source, thermometer, journal, epoch);
+        owner.a1 = Some(a1);
+        Ok(owner)
+    }
+
+    pub fn change_a1(
+        &mut self,
+        scale: Option<f64>,
+        bridge: Option<WattsPerKelvin>,
+    ) -> Result<(), Error> {
+        if self
+            .a1
+            .as_mut()
+            .is_some_and(|a1| a1.queue_change(scale, bridge))
+        {
+            Ok(())
+        } else {
+            Err(InstrumentError::InvalidInput("Недопустимое или уже ожидающее изменение A1").into())
+        }
+    }
+
+    fn snapshot_for(scenario: &str, yaml_scenario: &str, requested_w: Option<f64>) -> Snapshot {
         let mut yaml = String::from("hardware_enabled: false\nphase_a_config:\n");
         for line in SETUP_YAML.lines() {
             yaml.push_str("  ");
@@ -245,13 +299,21 @@ impl<'a> RecordingLoop<'a> {
         let control = control_config();
         let profile = ProtectionProfile::test_only_example();
         use std::fmt::Write;
+        write!(
+            &mut yaml,
+            "test_only:\n  scenario: {yaml_scenario}\n  period_ms: {}\n",
+            PERIOD.as_millis()
+        )
+        .unwrap();
+        if let Some(requested_w) = requested_w {
+            writeln!(&mut yaml, "  requested_w: {requested_w}").unwrap();
+        }
         write!(&mut yaml, concat!(
-            "test_only:\n  scenario: m6_recording_v1\n  period_ms: {}\n  requested_w: {}\n",
             "  simulators: [keithley_tsp_loopback, lakeshore_218_loopback]\n",
             "  temperature_channels: {{stage1: {}, stage2: {}, tf: 3, jacket: 4, sensor_unit: volts}}\n",
             "  source: {{limit_v: {}, limit_i: {}, limit_p: {}, source_range_i: {}, measure_range_i: {}, measure_range_v: {}, nplc: {}}}\n",
             "  control: {{kp: {}, ki_per_s: {}, total_limit_w: {}, max_sample_age_s: {}, margin: {}, slew_w_per_s: {}}}\n",
-        ), PERIOD.as_millis(), DEMAND_W, profile.stage1_channel, profile.stage2_channel,
+        ), profile.stage1_channel, profile.stage2_channel,
         source.limit_v.get(), source.limit_i.get(),
         source.limit_p.get(), source.source_range_i.get(), source.measure_range_i.get(), source.measure_range_v.get(), source.nplc,
         control.pi[0].kp, control.pi[0].ki.get(), control.total_limit.get(), control.max_sample_age.get(), MARGIN, SLEW_W_PER_S).unwrap();
@@ -281,7 +343,7 @@ impl<'a> RecordingLoop<'a> {
         head.min_temperature_k.get(), head.derated_power_w.get(), head.max_rate_k_per_s.get()).unwrap();
         Snapshot {
             config_yaml: yaml,
-            scenario: "test_only_m6_recording_v1".into(),
+            scenario: scenario.into(),
             references: Vec::new(),
         }
     }
@@ -362,7 +424,16 @@ impl<'a> RecordingLoop<'a> {
             return self.stop(correlation);
         }
         self.require_journal(correlation)?;
-        let frame = self.acquire(Instant::now(), Duration::ZERO, false);
+        let mut frame = self.acquire(Instant::now(), Duration::ZERO, false);
+        let held = if let Some(a1) = &self.a1 {
+            let held = HeldTf::from_inputs(&frame.input, a1_max_age());
+            if a1.failed || (frame.monitor.thermometer_connected && held.is_none()) {
+                invalidate_model(&mut frame);
+            }
+            held
+        } else {
+            None
+        };
         let input = self.record_inputs(correlation, frame.input, &frame.monitor)?;
         let decision = self.supervisor.operate(
             action,
@@ -371,7 +442,20 @@ impl<'a> RecordingLoop<'a> {
         )?;
         match decision.effect {
             Some(Effect::DisableBoth(request)) => self.apply_off(request, correlation)?,
-            Some(Effect::EnableBoth(request)) => self.enable(request, input, correlation)?,
+            Some(Effect::EnableBoth(request)) => {
+                if let Some(a1) = &mut self.a1 {
+                    if a1.held.is_none() {
+                        let started = held.is_some() && self.source.start_energy_tracking().is_ok();
+                        if !started {
+                            a1.failed = true;
+                            self.stop(correlation)?;
+                            return Err(Error::Safety(FaultReason::ModelFailure));
+                        }
+                        a1.held = held;
+                    }
+                }
+                self.enable(request, input, correlation)?;
+            }
             None => {}
         }
         self.require_no_safety_fault()?;
@@ -393,7 +477,33 @@ impl<'a> RecordingLoop<'a> {
         let id = self.next_id();
         let correlation = Correlation::Tick(id);
         self.require_journal(correlation)?;
+        let step = self.advance_a1();
         let mut frame = self.acquire(scheduled, PERIOD, missed);
+        let demand = if let Some(a1) = &mut self.a1 {
+            let mut demand = Demand::Observe;
+            if a1.failed {
+                invalidate_model(&mut frame);
+            } else if let Some(step) = step {
+                if let Some((held, requested)) = HeldTf::from_inputs(&frame.input, a1_max_age())
+                    .and_then(|held| a1.demand(held).map(|requested| (held, requested)))
+                {
+                    a1.held = Some(held);
+                    frame.input.demand = raw::Demand::VirtualBody {
+                        requested_w: requested.get(),
+                    };
+                    demand = Demand::VirtualBody(requested);
+                    frame.input.a1_step_v1 = Some(step);
+                } else if !frame.monitor.thermometer_connected {
+                    frame.input.a1_step_v1 = Some(step);
+                } else {
+                    a1.failed = true;
+                    invalidate_model(&mut frame);
+                }
+            }
+            demand
+        } else {
+            Demand::Power(w(DEMAND_W))
+        };
         let dt = self
             .last_control
             .map_or(PERIOD, |previous| frame.monitor.monotonic - previous);
@@ -419,7 +529,7 @@ impl<'a> RecordingLoop<'a> {
                 now,
                 &mut self.controller,
                 Tick {
-                    demand: Demand::Power(w(DEMAND_W)),
+                    demand,
                     permit: HeatPermit::Inhibit,
                     branches_available: frame.samples.map(|value| value.is_some()),
                     measurements: frame.samples,
@@ -460,6 +570,25 @@ impl<'a> RecordingLoop<'a> {
 
     pub fn poll_close(&mut self) -> CloseResult {
         self.journal.poll_close()
+    }
+
+    fn advance_a1(&mut self) -> Option<raw::A1StepV1> {
+        let a1 = self.a1.as_mut()?;
+        if a1.failed || a1.held.is_none() {
+            return None;
+        }
+        let step = self
+            .source
+            .take_energy_interval()
+            .ok()
+            .and_then(|interval| {
+                let interval_end_ns = ns(interval.ended_at.checked_duration_since(self.epoch)?);
+                let step = a1.advance(interval, interval_end_ns, a1_max_age())?;
+                self.thermometer.set_temperatures(a1.temperatures()).ok()?;
+                Some(step)
+            });
+        a1.failed = step.is_none();
+        step
     }
 
     fn transport(
@@ -541,7 +670,7 @@ impl<'a> RecordingLoop<'a> {
                 },
             })
         });
-        let input = raw::Inputs {
+        let mut input = raw::Inputs {
             scheduled_ns: ns(self.since_epoch(scheduled)),
             measured_ns: ns(now),
             wall_time_s: monitor.wall_time_s.get(),
@@ -565,8 +694,12 @@ impl<'a> RecordingLoop<'a> {
                 read_finished_ns: temperatures[index]
                     .map(|value| ns(self.since_epoch(value.finished))),
             }),
-            demand: raw::Demand::Power {
-                requested_w: DEMAND_W,
+            demand: if self.a1.is_some() {
+                raw::Demand::Observe
+            } else {
+                raw::Demand::Power {
+                    requested_w: DEMAND_W,
+                }
             },
             source_connected: monitor.source_connected,
             thermometer_connected: monitor.thermometer_connected,
@@ -577,7 +710,26 @@ impl<'a> RecordingLoop<'a> {
             model_valid: true,
             journal_ok: monitor.journal_ok,
             cooling_phase: "cooling",
+            a1_step_v1: None,
         };
+        if self.a1.is_some() && temperatures[2].is_some() {
+            // The 218 reading starts with RDGST. A1 holds the later KRDG sample.
+            input.temperatures[2].read_started_ns = self
+                .trace
+                .borrow()
+                .events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Event::Dispatch {
+                        source: "lakeshore",
+                        command,
+                        status: "sent",
+                        at_ns,
+                    } if command == "KRDG? 3" => Some(*at_ns),
+                    _ => None,
+                });
+        }
         Frame {
             monitor,
             input,
@@ -721,7 +873,11 @@ impl<'a> RecordingLoop<'a> {
                 self.record_transport(correlation)?;
             }
         }
-        self.controller.reset_fault();
+        if self.a1.is_some() {
+            self.controller = controller();
+        } else {
+            self.controller.reset_fault();
+        }
         self.last_control = None;
         self.record_output(correlation)?;
         self.require_journal(correlation)
@@ -920,6 +1076,13 @@ fn quality(result: Result<(), &InstrumentError>) -> Quality {
 
 fn temperature_time(reading: TemperatureReading) -> Instant {
     reading.measurement_time.unwrap_or(reading.started)
+}
+fn a1_max_age() -> Duration {
+    ProtectionProfile::test_only_example().max_temperature_age
+}
+fn invalidate_model(frame: &mut Frame) {
+    frame.monitor.model_valid = false;
+    frame.input.model_valid = false;
 }
 fn ns(value: Duration) -> u64 {
     value

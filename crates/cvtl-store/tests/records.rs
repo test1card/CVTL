@@ -130,3 +130,42 @@ fn floating_point_inputs_preserve_their_bits() {
     assert_eq!(mass.to_bits(), value.to_bits());
     assert_eq!(energy.to_bits(), (-0.0_f64).to_bits());
 }
+
+#[test]
+fn a1_step_round_trips_without_changing_legacy_inputs() {
+    use cvtl_store::record::{A1ChangeV1, A1StepV1, Demand};
+    // Extracted from the verified 600-tick v1 fixture before the extension.
+    let legacy = concat!(r#"{"schema":1,"run":"m6-14850-1794337250046742000","generation":1,"seq":146,"accepted_ns":19835541,"correlation":{"type":"request","id":1},"kind":"inputs","frame":{"scheduled_ns":18954000,"measured_ns":19832791,"wall_time_s":1794337250.066817,"dt_ns":0,"power":[{"channel":"a","quality":"measured","current_a":0.0,"voltage_v":0.0,"target_w":0.0,"read_started_ns":18954500,"read_finished_ns":19009875},{"channel":"b","quality":"measured","current_a":0.0,"voltage_v":0.0,"target_w":0.0,"read_started_ns":19011791,"read_finished_ns":19055041}],"temperatures":[{"point":"stage1","channel":1,"quality":"measured","temperature_k":42.0,"read_started_ns":19056583,"read_finished_ns":19287666},{"point":"stage2","channel":2,"quality":"measured","temperature_k":42.0,"read_started_ns":19287791,"read_finished_ns":19472000},{"point":"tf","channel":3,"quality":"measured","temperature_k":42.0,"read_started_ns":19472208,"read_finished_ns":19657541},{"point":"jacket","channel":4,"quality":"measured","temperature_k":42.0,"read_started_ns":19657750,"read_finished_ns":19832208}],"demand":{"mode":"power","requested_w":0.75},"source_connected":true,"thermometer_connected":true,"missed_tick":false,"allow_stale_once":false,"expect_tick":false,"queue_fault":false,"model_valid":true,"journal_ok":true,"cooling_phase":"cooling"}}"#, "\n").as_bytes();
+    let mut row = decode_line(legacy).unwrap();
+    assert_eq!(encode_line(&row).unwrap(), legacy);
+    let Event::Inputs { frame } = &mut row.event else {
+        panic!("expected inputs");
+    };
+    assert!(frame.a1_step_v1.is_none());
+    frame.demand = Demand::VirtualBody { requested_w: 0.28 };
+    frame.a1_step_v1 = Some(A1StepV1 {
+        interval_ns: 100_000_000,
+        heater_energy_j: [0.02, 0.03],
+        held_tf_k: 16.0,
+        held_tf_age_ns: 101_000_000,
+        body_temperature_k: 29.999,
+        change: Some(A1ChangeV1 {
+            scale: Some(0.2),
+            bridge_w_per_k: None,
+            dh_event_j: Some(3.0),
+            temperature_before_k: 29.999,
+            temperature_after_k: 29.999,
+        }),
+    });
+    let bytes = encode_line(&row).unwrap();
+    assert!(std::str::from_utf8(&bytes)
+        .unwrap()
+        .contains("\"a1_step_v1\""));
+    assert_eq!(decode_line(&bytes).unwrap(), row);
+
+    let Event::Inputs { frame } = &mut row.event else {
+        unreachable!()
+    };
+    frame.a1_step_v1.as_mut().unwrap().interval_ns = 0;
+    assert!(matches!(encode_line(&row), Err(RecordError::Format)));
+}

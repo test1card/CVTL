@@ -73,10 +73,12 @@
         <File>crates/cvtl-sim/tests/m5_tcp_supervisor.rs</File>
         <File>crates/cvtl-sim/tests/m6_recording.rs</File>
         <File>crates/cvtl-sim/tests/a1_head.rs</File>
+        <File>crates/cvtl-sim/tests/a1_loop.rs</File>
       </TestFiles>
       <TraceAssertion>Симуляторы воспроизводят отклик нагрузки и отказы. TCP-сценарии проверяют реакцию и подтверждения OFF.</TraceAssertion>
       <TraceAssertion>В записанном прогоне входы и intent предшествуют отправке. Отказ raw блокирует обе ветви, восстановление требует действий оператора.</TraceAssertion>
       <TraceAssertion>Синтетический шаг совпадает с численными эталонами. Головка получает фактическое U × I эмулятора, её температуры читаются по соответствующим каналам Lake Shore.</TraceAssertion>
+      <TraceAssertion>Фактическая энергия сохраняется при потере чтения. Замкнутый A1 фиксирует шаг головы, удержанное tf, изменение scale и моста. Просроченное tf блокирует модельный шаг и Drive. Для повторного пуска после потери связи нужны подтверждённый OFF и действия оператора.</TraceAssertion>
     </V-M-CVTL-SIM>
     <V-M-CVTL-STORE>
       <Command>cargo test --locked -p cvtl-store</Command>
@@ -87,6 +89,7 @@
         <File>crates/cvtl-store/tests/file_session.rs</File>
       </TestFiles>
       <TraceAssertion>Пакет принимается целиком. Поздний sync не снимает просрочку. При восстановлении выдаются только полные кадры с проверенной контрольной суммой и непрерывным seq.</TraceAssertion>
+      <TraceAssertion>Тепловой блок A1 проходит кодек и проверку чисел. Без него прежняя запись Inputs сохраняет байтовое представление.</TraceAssertion>
     </V-M-CVTL-STORE>
     <V-M-CVTL-ANALYSIS>
       <Command>cargo test --locked -p cvtl-analysis --test stage_i</Command>

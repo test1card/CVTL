@@ -2,7 +2,7 @@
 // VERSION: 0.1.0
 // START_MODULE_CONTRACT
 //   PURPOSE: Emulate the supported Keithley TSP subset
-//   SCOPE: One state supplies I/V replies and applied heater power
+//   SCOPE: One state supplies I/V replies, applied heater power and interval energy
 //   DEPENDS: M-CVTL-CORE, M-CVTL-INSTRUMENTS
 //   LINKS: M-CVTL-SIM
 //   ROLE: RUNTIME
@@ -10,16 +10,18 @@
 // END_MODULE_CONTRACT
 // START_MODULE_MAP
 //   KeithleySimulator - loopback source and delivered power snapshot
+//   EnergyInterval - integrated branch energies over one measured interval
 // END_MODULE_MAP
 //! Small deterministic TSP subset for offline tests; no hardware access.
 use crate::loopback::{LoopbackServer, Reply};
-use cvtl_core::units::{Ohms, Watts};
+use cvtl_core::units::{Joules, Ohms, Watts};
 use cvtl_instruments::keithley::Channel;
 use std::{
     collections::HashMap,
     io,
     net::SocketAddr,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 // These are the only writable fields implemented by the simulated TSP subset.
@@ -52,9 +54,41 @@ struct State {
     disconnect_next_query: bool,
     override_query: Option<(String, Vec<u8>)>,
     query_counts: HashMap<String, usize>,
+    energy: Option<EnergyMeter>,
+}
+
+struct EnergyMeter {
+    started: Instant,
+    last: Instant,
+    joules: [f64; 2],
+}
+
+/// Synthetic applied energy over the interval since the previous sample.
+pub struct EnergyInterval {
+    pub ended_at: Instant,
+    pub duration: Duration,
+    pub energy: [Joules; 2],
 }
 
 impl State {
+    fn account_energy(&mut self, now: Instant) {
+        let Some(last) = self.energy.as_ref().map(|meter| meter.last) else {
+            return;
+        };
+        let dt = now
+            .checked_duration_since(last)
+            .map_or(f64::NAN, |time| time.as_secs_f64());
+        let power = [0, 1].map(|index| {
+            let (current, voltage) = self.iv(index);
+            current * voltage
+        });
+        let meter = self.energy.as_mut().expect("energy tracking is enabled");
+        for (energy, power) in meter.joules.iter_mut().zip(power) {
+            *energy += power * dt;
+        }
+        meter.last = now;
+    }
+
     fn iv(&self, index: usize) -> (f64, f64) {
         let fields = &self.fields[index];
         let on = *fields.get("source.output").unwrap_or(&0.0) == 1.0;
@@ -161,6 +195,7 @@ impl KeithleySimulator {
                 if !value.is_finite() {
                     return Reply::Disconnect;
                 }
+                s.account_energy(Instant::now());
                 s.fields[idx].insert(key.to_owned(), value);
                 if key == "source.rangei" {
                     s.fields[idx].insert("measure.rangei".to_owned(), value);
@@ -190,6 +225,51 @@ impl KeithleySimulator {
             )),
         }
     }
+
+    /// Start interval accounting for the new synthetic A1 scenario.
+    pub fn start_energy_tracking(&self) -> io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if state.energy.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "energy tracking already started",
+            ));
+        }
+        let now = Instant::now();
+        state.energy = Some(EnergyMeter {
+            started: now,
+            last: now,
+            joules: [0.0; 2],
+        });
+        Ok(())
+    }
+
+    pub fn take_energy_interval(&self) -> io::Result<EnergyInterval> {
+        let mut state = self.state.lock().unwrap();
+        let ended_at = Instant::now();
+        state.account_energy(ended_at);
+        let meter = state.energy.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "energy tracking not started")
+        })?;
+        let duration = ended_at
+            .checked_duration_since(meter.started)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "energy clock went backwards")
+            })?;
+        let [Some(a), Some(b)] = meter.joules.map(Joules::new) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "nonfinite applied energy",
+            ));
+        };
+        meter.started = ended_at;
+        meter.joules = [0.0; 2];
+        Ok(EnergyInterval {
+            ended_at,
+            duration,
+            energy: [a, b],
+        })
+    }
     pub fn disconnect_next_query(&self) {
         self.state.lock().unwrap().disconnect_next_query = true;
     }
@@ -216,7 +296,9 @@ impl KeithleySimulator {
             Channel::A => 0,
             Channel::B => 1,
         };
-        self.state.lock().unwrap().loads[i] = resistance.get();
+        let mut state = self.state.lock().unwrap();
+        state.account_energy(Instant::now());
+        state.loads[i] = resistance.get();
         Ok(())
     }
 }
