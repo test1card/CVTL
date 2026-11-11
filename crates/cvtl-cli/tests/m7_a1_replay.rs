@@ -278,6 +278,124 @@ fn derived_fields_cannot_substitute_for_the_body_calculation() {
 }
 
 #[test]
+fn roundoff_applies_only_to_recomputed_thermal_values() {
+    #[derive(Clone, Copy)]
+    enum Field {
+        Body,
+        BeforeChange,
+        AfterChange,
+        EnthalpyChange,
+        Request,
+        HeldTf,
+    }
+
+    let run = Run::record(constant());
+    let raw = run.path().join("raw.ndjson.zst");
+    let original = fs::read(&raw).unwrap();
+    let replay_change = |field, change: fn(f64) -> f64| {
+        fs::write(&raw, &original).unwrap();
+        let mut correlation = Correlation::Run;
+        let seq = run.alter(|row| {
+            let Event::Inputs { frame } = &mut row.event else {
+                return false;
+            };
+            let Some(step) = &mut frame.a1_step_v1 else {
+                return false;
+            };
+            let value = match field {
+                Field::Body => Some(&mut step.body_temperature_k),
+                Field::BeforeChange => step
+                    .change
+                    .as_mut()
+                    .map(|row| &mut row.temperature_before_k),
+                Field::AfterChange => step.change.as_mut().map(|row| &mut row.temperature_after_k),
+                Field::EnthalpyChange => {
+                    step.change.as_mut().and_then(|row| row.dh_event_j.as_mut())
+                }
+                Field::Request => match &mut frame.demand {
+                    Demand::VirtualBody { requested_w } => Some(requested_w),
+                    _ => None,
+                },
+                Field::HeldTf => Some(&mut step.held_tf_k),
+            };
+            let Some(value) = value else {
+                return false;
+            };
+            *value = change(*value);
+            correlation = row.correlation;
+            true
+        });
+        (seq, correlation, run.replay())
+    };
+    let assert_mismatch = |seq, message, output: Output| {
+        let result = report(&output);
+        assert!(!output.status.success(), "{result}");
+        assert_eq!(result["status"], "mismatch", "{result}");
+        assert_eq!(result["first_diagnostic"]["seq"], seq, "{result}");
+        assert_eq!(result["first_diagnostic"]["message"], message, "{result}");
+    };
+    let enthalpy_mismatch = "Пересчитанное dH_event A1 отличается";
+    for (field, message) in [
+        (Field::Body, "Пересчитанная температура тела A1 отличается"),
+        (
+            Field::BeforeChange,
+            "Температура до смены параметров A1 отличается",
+        ),
+        (
+            Field::AfterChange,
+            "Температура после смены параметров A1 отличается",
+        ),
+        (Field::EnthalpyChange, enthalpy_mismatch),
+    ] {
+        let (_, _, output) = replay_change(field, f64::next_up);
+        let result = report(&output);
+        assert!(output.status.success(), "{result}");
+        assert_eq!(result["status"], "matched", "{result}");
+        assert_eq!(result["a1"]["thermal_steps"], 6, "{result}");
+        assert_eq!(
+            result["output_state_at_boundary"], "off_verified",
+            "{result}"
+        );
+
+        let (seq, _, output) = replay_change(field, |value| value + 1e-8);
+        assert_mismatch(seq, message, output);
+    }
+
+    let (seq, _, output) = replay_change(Field::EnthalpyChange, |value| {
+        assert!(value < 0.0);
+        -value
+    });
+    assert_mismatch(seq, enthalpy_mismatch, output);
+
+    let (seq, _, output) = replay_change(Field::HeldTf, f64::next_up);
+    assert_mismatch(
+        seq,
+        "Удержанное наблюдение tf отличается от входов A1",
+        output,
+    );
+
+    let (seq, _, output) = replay_change(Field::Request, |value| value + 1e-8);
+    assert_mismatch(seq, "Пересчитанный запрос тела A1 отличается", output);
+
+    let (inputs_seq, correlation, output) = replay_change(Field::Request, f64::next_up);
+    let mut control_seq = None;
+    let recovered = recover(fs::File::open(&raw).unwrap(), |row| {
+        if row.correlation == correlation && matches!(row.event, Event::Control { .. }) {
+            assert!(control_seq.replace(row.seq).is_none());
+        }
+    })
+    .unwrap();
+    assert_eq!(recovered.tail, Tail::FrameBoundary);
+    let control_seq = control_seq.unwrap();
+    assert!(control_seq > inputs_seq);
+    assert_mismatch(
+        control_seq,
+        "Пересчитанное решение M4/M5 отличается побитово",
+        output,
+    );
+}
+
+#[test]
 fn source_loss_and_manual_restart_require_causal_evidence() {
     let run = Run::record(Scenario::SourceLoss);
     let output = run.replay();

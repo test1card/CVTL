@@ -196,7 +196,9 @@ impl ThermalReplay {
         let held = self
             .held
             .ok_or_else(|| op.mismatch(frame.seq, "Тепловой шаг A1 до Start"))?;
-        if !frame.monitor.model_valid || !same(step.held_tf_k, held.temperature.get()) {
+        if !frame.monitor.model_valid
+            || step.held_tf_k.to_bits() != held.temperature.get().to_bits()
+        {
             return Err(op.mismatch(
                 frame.seq,
                 "Удержанное наблюдение tf отличается от входов A1",
@@ -239,35 +241,40 @@ impl ThermalReplay {
                 return Err(op.mismatch(frame.seq, "Изменение G доступно для постоянного моста"));
             }
             let before = self.body.temperature().get();
-            if !same(before, change.temperature_before_k) {
+            if !within_thermal_roundoff(before, change.temperature_before_k, 1.0) {
                 return Err(op.mismatch(frame.seq, "Температура до смены параметров A1 отличается"));
             }
             if change.mass_kg.is_some() || change.scale.is_some() {
                 let mass = change.mass_kg.map(|mass| Kilograms::new(mass).unwrap());
+                let enthalpy_before = self.body.enthalpy().get();
                 let dh = self
                     .body
                     .reconfigure_mass_scale(mass, change.scale)
                     .map_err(|_| {
                         op.mismatch(frame.seq, "Недопустимое изменение массы или scale A1")
                     })?;
-                if !change
-                    .dh_event_j
-                    .is_some_and(|recorded| same(dh.get(), recorded))
-                {
+                let enthalpy_scale = enthalpy_before.abs().max(self.body.enthalpy().get().abs());
+                if !change.dh_event_j.is_some_and(|recorded| {
+                    within_thermal_roundoff(dh.get(), recorded, enthalpy_scale)
+                }) {
                     return Err(op.mismatch(frame.seq, "Пересчитанное dH_event A1 отличается"));
                 }
             }
             if let Some(bridge) = change.bridge_w_per_k {
                 self.bridge = Bridge::Constant(WattsPerKelvin::new(bridge).unwrap());
             }
-            if !same(self.body.temperature().get(), change.temperature_after_k) {
+            if !within_thermal_roundoff(
+                self.body.temperature().get(),
+                change.temperature_after_k,
+                1.0,
+            ) {
                 return Err(op.mismatch(
                     frame.seq,
                     "Температура после смены параметров A1 отличается",
                 ));
             }
         }
-        if !same(self.body.temperature().get(), step.body_temperature_k) {
+        if !within_thermal_roundoff(self.body.temperature().get(), step.body_temperature_k, 1.0) {
             return Err(op.mismatch(frame.seq, "Пересчитанная температура тела A1 отличается"));
         }
         let demand = if let Some(current) = self.observe_tf(frame) {
@@ -280,12 +287,14 @@ impl ThermalReplay {
                 .and_then(|flow| request(EmulationMode::AdditionalLoad, flow))
                 .map_err(|_| op.mismatch(frame.seq, "Недопустимый запрос тела A1"))?
                 .requested;
-            if !matches!(frame.tick.demand, Demand::VirtualBody(recorded) if same(recorded.get(), requested.get()))
+            if !matches!(frame.tick.demand, Demand::VirtualBody(recorded)
+                if within_thermal_roundoff(requested.get(), recorded.get(), 1.0))
             {
                 return Err(op.mismatch(frame.seq, "Пересчитанный запрос тела A1 отличается"));
             }
             self.held = Some(current);
-            Demand::VirtualBody(requested)
+            // M4/M5 must replay the verified input used by the original tick.
+            frame.tick.demand
         } else if !frame.monitor.thermometer_connected
             && matches!(frame.tick.demand, Demand::Observe)
         {
@@ -317,6 +326,46 @@ impl ThermalReplay {
     }
 }
 
-fn same(left: f64, right: f64) -> bool {
-    left.to_bits() == right.to_bits()
+fn within_thermal_roundoff(computed: f64, recorded: f64, scale: f64) -> bool {
+    let magnitude = computed.abs().max(recorded.abs()).max(scale).max(1.0);
+    computed.is_finite()
+        && recorded.is_finite()
+        && (computed - recorded).abs() <= (64.0 * f64::EPSILON) * magnitude
+}
+
+#[cfg(test)]
+mod tests {
+    use super::within_thermal_roundoff;
+
+    #[test]
+    fn thermal_roundoff_has_an_inclusive_scaled_boundary() {
+        let limit = 64.0 * f64::EPSILON;
+        assert!(within_thermal_roundoff(0.0, -0.0, 1.0));
+        assert!(within_thermal_roundoff(0.0, limit, 1.0));
+        assert!(!within_thermal_roundoff(0.0, limit.next_up(), 1.0));
+
+        let inside = 32.0 - 32.0 * limit;
+        assert!(within_thermal_roundoff(32.0, inside, 1.0));
+        assert!(!within_thermal_roundoff(32.0, inside.next_down(), 1.0));
+        assert!(within_thermal_roundoff(
+            -128.0 * limit,
+            128.0 * limit,
+            256.0
+        ));
+        assert!(!within_thermal_roundoff(
+            -256.0 * limit,
+            256.0 * limit,
+            256.0
+        ));
+    }
+
+    #[test]
+    fn thermal_roundoff_rejects_nonfinite_values_and_overflow() {
+        assert!(!within_thermal_roundoff(f64::MAX, -f64::MAX, 1.0));
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!within_thermal_roundoff(invalid, 0.0, 1.0));
+            assert!(!within_thermal_roundoff(0.0, invalid, 1.0));
+            assert!(!within_thermal_roundoff(invalid, invalid, 1.0));
+        }
+    }
 }
