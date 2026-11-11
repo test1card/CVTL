@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="draft">
+<GraceChangePlan graceVersion="4.0" status="approved">
   <C-CVTL-M9-REPLAY-PORTABILITY>
     <IntentSummary>Проверить переносимость одного набора архивов на базе 049a171. Допуск относится к округлению пяти вычисляемых полей A1. Рабочий контур, физика, сохранённые данные и точная проверка M4/M5 сохраняют прежний контракт.</IntentSummary>
     <BaselineAssertions>
