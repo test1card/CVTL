@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="draft">
+<GraceChangePlan graceVersion="4.0" status="approved">
   <C-CVTL-M9-A1-ACCEPTANCE>
     <IntentSummary>Записать штатный A1, сквозные отказы и перезапуск на базе 9ef5e22. Переиспользовать контур, M5, журналы и реплей. Инъекции относятся только к локальным эмуляторам. Исполнение после отдельного утверждения плана и baseline.</IntentSummary>
     <BaselineAssertions>
