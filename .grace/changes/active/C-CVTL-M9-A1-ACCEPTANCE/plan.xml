@@ -1,0 +1,69 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M9-A1-ACCEPTANCE>
+    <IntentSummary>Записать штатный A1, сквозные отказы и перезапуск на базе 9ef5e22. Переиспользовать контур, M5, журналы и реплей. Инъекции относятся только к локальным эмуляторам. Исполнение после отдельного утверждения плана и baseline.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist><Value>.grace/changes/archive/C-CVTL-M8-ANALYSIS/plan.xml</Value><Value>M-CVTL-SIM</Value><Value>M-CVTL-STORE</Value><Value>M-CVTL-CLI</Value><Value>M-CVTL-DAEMON</Value><Value>crates/cvtl-daemon/tests/operator_http.rs</Value></MustExist>
+      <MustNotExist><Value>crates/cvtl-cli/examples/m9_a1_acceptance.rs</Value></MustNotExist>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist><Value>crates/cvtl-cli/examples/m9_a1_acceptance.rs</Value><Value>docs/M9_A1_ACCEPTANCE.md</Value></MustExist>
+      <MustVerify><Module>M-CVTL-SIM</Module><Module>M-CVTL-STORE</Module><Module>M-CVTL-CLI</Module><Module>M-CVTL-DAEMON</Module></MustVerify>
+      <MustContain><File>crates/cvtl-daemon/tests/operator_http.rs</File><Text>process_restart_requires_new_arm_and_start</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="3">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="41">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-SIM /><M-CVTL-STORE /><M-CVTL-CLI /><M-CVTL-DAEMON /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-SIM /><V-M-CVTL-STORE /><V-M-CVTL-CLI /><V-M-CVTL-DAEMON /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>crates/cvtl-sim/src/recording.rs</File>
+      <File>crates/cvtl-sim/src/lakeshore.rs</File>
+      <File>crates/cvtl-store/src/writer.rs</File>
+      <File>crates/cvtl-cli/examples/m9_a1_acceptance.rs</File>
+      <File>crates/cvtl-daemon/tests/operator_http.rs</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/M9_A1_ACCEPTANCE.md</File>
+      <File>docs/STATUS.md</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Достижимая ступень и насыщение замкнутого A1</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала сценарий проверок метрик. Release-пример использует обычный A1, 20 кг OFHC при 30 К, scale 0,1, 120 тактов по расписанию 100 мс. Изменение G с 0,02 на 0,04 Вт/К принимается на такте 50. Принятая запись изменения задаёт начало отсчёта установления. Требовать положительную ступень запроса 0,20–0,35 Вт, диапазон 0,2–0,8 Вт в штатном окне и совпадение запроса и доступной уставки до 1e-9 Вт. Такты 30–49 и 101–120 должны иметь пригодную мощность, без ограничений и без отказов. Это сценарий test_only, обоснованный измеренной реализуемостью в архиве M8.</Criterion>
+          <Criterion>Ошибка равна abs(измерено−доступная уставка), допуск в установившемся окне max(1 % соответствующей уставки, 0,005 Вт). Установление до 2 % считают по первому пригодному такту после ступени, от которого все оставшиеся измерения в полосе, минимум десять измерений. Срок не больше 2 с по монотонным отметкам Control.at_ns на такте ступени и такте установления. Время старта тика и подтверждённая задержка от начала чтения A до последнего ACK берутся из TickReport. Сохранить строки хоста с scheduled_ns и связать с raw. Джиттер abs(интервал стартов−100 мс), ближайший верхний ранг для медианы, p95, p99 и максимум. p99 джиттера не больше 20 мс, p99 задержки не больше 300 мс, пропущенные такты учитываются явно.</Criterion>
+          <Criterion>Сопоставить Inputs и Control по идентификатору такта. Сверить измеренную мощность с суммой пригодных U×I, проверить границу raw, квитанцию и реплей. Сохранять snapshot, raw, исходные строки хоста, численный результат и время выполнения по часам хоста. Модельное время берётся из записанных шагов. Долгий пример запускается отдельной release-командой и не входит в автоматический бюджет cargo test.</Criterion>
+          <Criterion>Сценарий насыщения использует ту же установку и G=0,60 Вт/К, 20 активных тактов. Для тактов 11–20 показать запрос выше доступной мощности, power_limited, пригодные фактические измерения, Running и последовательные модельные шаги. Запрос сверить с G×(T тела−tf). Выходы и raw закрываются отдельно через Stop и подтверждения. Полный реплей проверяет допустимость команд.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-cli --example m9_a1_acceptance</Command><Command>cargo run --release --locked -p cvtl-cli --example m9_a1_acceptance</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Сквозные отказы и восстановление</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала тесты однократных ответов Lake Shore. Добавить типизированные одноразовые подмену KRDG и задержку валидного RDGST по каналу только в эмуляторе, снять блокировку состояния до задержки. В fixture инверсии на работающем прогоне после положительной мощности подменить KRDG канала stage2 на 47 К. Подтвердить HeadInversion как причину, отсутствие Drive в отказном такте, оба Off intent и причинные ответы OFF. Область абсолютных температур и действующие пороги M5 берутся из обычного test_only профиля.</Criterion>
+          <Criterion>Для отдельного испытания устаревания создать fixture A1 с max_temperature_age=160 мс, max_tick_gap=1500 мс. Один раз задержать корректный RDGST канала stage2 на 200 мс внутри штатного срока 250 мс. Начало тика своевременно, tf читается после задержки. Тот же возраст используется в Supervisor, A1 и snapshot через общие конструкторы. Подтвердить TemperatureStale, пригодную связь, отсутствие MissedTick и ModelFailure, фактический возраст превышает 160 мс, оба OFF и отсутствие Drive. У обычных сценариев сохраняется поставляемый test_only профиль.</Criterion>
+          <Criterion>Потерю источника и термометра проверить раздельно после положительного нагрева, существующими disconnect_next_query и Fault::Disconnect. При потере источника наблюдается SourceLinkLost, Unknown и запрос резервного пути. Off intent сохраняется, отсутствие парного доказательства показано явно. При потере термометра наблюдается ThermometerLinkLost, здоровый Keithley подтверждает обе ветви OFF. Очистить fault эмулятора при необходимости, вручную Recover и Reset. Start до нового Arm отклоняется, нулевой выход подтверждён. После явных Arm и Start первый штатный такт подтверждает команду и следующий отсчёт показывает нагрев. Сохранить исходные файлы и проверить реплей.</Criterion>
+          <Criterion>Открытие существующего FileSink сделать доступным для fixture и использовать spawn_with_sink с обёрткой, отказывающей в следующей записи raw до записи байтов. Явный A1 acceptance-конструктор получает тот же проверенный snapshot и фабрику. После нагрева и появления устойчивого префикса во время регулярных тактов включить отказ. Дождаться Writer(Write) и JournalFailure, FaultLatched и OffVerified. Подтверждения обеих ветвей и фактическая нулевая мощность фиксируются отдельно, если terminal событие raw не сохранилось. Следующий запрос тика отвергается, принятый seq не растёт, CloseResult Failed. Восстановить реальный префикс с контрольной суммой и непрерывными seq, previous durable не больше recovered records и recovered records меньше accepted на отказе. Квитанция появляется только у успешно закрытых записей.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-sim</Command><Command>cargo test --locked -p cvtl-store</Command><Command>cargo run --release --locked -p cvtl-cli --example m9_a1_acceptance</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Фактический перезапуск и приёмка</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Тест process_restart_requires_new_arm_and_start в существующем operator_http запускает отдельный процесс демона, ждёт Running, подтверждённое ON и положительный I×V в проверенном кадре. Child::kill и wait завершают только процесс теста. Второй запуск использует прежние assets и корень runs. Старый архив сохраняется побайтно, отсутствует completed.json, состояние выхода старого процесса после kill обозначается Unknown. Префикс восстанавливается и незакрытая запись отсутствует в списке завершённых.</Criterion>
+          <Criterion>Новый процесс в исходном состоянии без active run отклоняет старый ID. Новый прогон имеет иной ID, подтверждённый OFF и минимум три нулевых измерения. Start без Arm отклоняется владельцем, после Arm всё ещё OFF. После отдельного Start первый штатный A1 такт принимается и появляется положительное измерение. Закрыть новый прогон с квитанцией, сверить raw порядок On и положительного Drive после нового допуска и хэши старых файлов. Опциональный CVTL_M9_RESTART_EVIDENCE_DIR сохраняет оба каталога и сводку за пределами runtime, обычный тест очищает временные файлы.</Criterion>
+          <Criterion>Сохранить протокол docs/M9_A1_ACCEPTANCE.md с измеренными результатами, средой, командами, сырыми префиксами, границами OFF и связью с тестами §10.3. Фактические прогоны и Rust-набор повторить на macOS и Ubuntu 22.04 с локальными эмуляторами. Номера интервалов и журналы доступны в локальном каталоге свидетельств. Бюджеты определены на чистой прогретой базе из максимумов 0,29 с и 9,98 с по формуле ceil(4 × максимум)+1. Выполнить baseline, target и final, независимое ревью точного дерева и отдельный APPLY.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo fmt --all -- --check</Command><Command>cargo build --workspace --locked</Command><Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command><Command>cargo test --workspace --locked</Command><Command>cargo test --locked -p cvtl-daemon --test operator_http process_restart_requires_new_arm_and_start</Command></Verification>
+      </T-003>
+    </ImplementationPlan>
+  </C-CVTL-M9-A1-ACCEPTANCE>
+</GraceChangePlan>
