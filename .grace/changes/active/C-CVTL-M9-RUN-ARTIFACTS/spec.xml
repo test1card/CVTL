@@ -1,4 +1,4 @@
-<GraceChangeSpec graceVersion="4.0" status="draft">
+<GraceChangeSpec graceVersion="4.0" status="approved">
   <C-CVTL-M9-RUN-ARTIFACTS>
     <Summary>Подготовить воспроизводимые производные файлы прогона по §12.4 ТЗ и ADR 0003.</Summary>
     <Problem>Демон записывает снимок, первичный журнал, события и метаданные. Реплей и M8 проверяют данные и возвращают JSON. Для передачи результатов требуется материализация производных, CSV, Parquet и автономного HTML-отчёта.</Problem>
