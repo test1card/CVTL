@@ -77,6 +77,7 @@
         <File>crates/cvtl-sim/tests/m6_recording.rs</File>
         <File>crates/cvtl-sim/tests/a1_head.rs</File>
         <File>crates/cvtl-sim/tests/a1_loop.rs</File>
+        <File>crates/cvtl-sim/src/lakeshore.rs</File>
       </TestFiles>
       <TraceAssertion>Симуляторы воспроизводят отклик нагрузки и отказы. TCP-сценарии проверяют реакцию и подтверждения OFF.</TraceAssertion>
       <TraceAssertion>В записанном прогоне входы и intent предшествуют отправке. Отказ raw блокирует обе ветви, восстановление требует действий оператора.</TraceAssertion>
@@ -85,6 +86,7 @@
       <TraceAssertion>Номинальный A1 v1 сохраняет сценарий 20 кг и исходный формат снимка. Настраиваемый A1 v2 проходит файловые проверки в CLI.</TraceAssertion>
       <TraceAssertion>Короткий прогноз совпадает с эталоном первого теплового шага. Знаковый поток сохраняется, идеальный нагрев ограничен.</TraceAssertion>
       <TraceAssertion>Калибровочный профиль записывает применённую границу и скрывает эталон отвода. Все четыре запуска закрывают журнал после подтверждённого OFF.</TraceAssertion>
+      <TraceAssertion>Одноразовые KRDG и RDGST ограничены каналом. Рабочий A1 фиксирует отдельные причины инверсии, устаревания и потери каждого прибора. Повторный нагрев требует Recover, Reset, Arm и Start.</TraceAssertion>
     </V-M-CVTL-SIM>
     <V-M-CVTL-STORE>
       <Command>cargo test --locked -p cvtl-store</Command>
@@ -97,6 +99,7 @@
       <TraceAssertion>Пакет принимается целиком. Поздний sync не снимает просрочку. При восстановлении выдаются только полные кадры с проверенной контрольной суммой и непрерывным seq.</TraceAssertion>
       <TraceAssertion>Тепловой блок A1 проходит кодек и проверку чисел. Смена массы требует dH_event. Прежние записи Inputs сохраняют байтовое представление.</TraceAssertion>
       <TraceAssertion>Наблюдатель получает только принятые пакеты и точный Receipt. Отвергнутая пачка не поступает в проекцию GUI.</TraceAssertion>
+      <TraceAssertion>При отказе записи кадра на работающем A1 проверенный raw сохраняет устойчивый префикс. Подтверждения OFF получены в живом обмене, а завершение журнала возвращает Failed.</TraceAssertion>
     </V-M-CVTL-STORE>
     <V-M-CVTL-ANALYSIS>
       <Command>cargo test --locked -p cvtl-analysis --test stage_i</Command>
@@ -118,6 +121,7 @@
       <TraceAssertion>Запуск с конфигом поставки завершает проверку без обращения к оборудованию.</TraceAssertion>
       <TraceAssertion>Демон отклоняет чужие Host и Origin, некорректное тело и устаревшую команду. Stop снимает ожидающее действие. Реальный HTTP-прогон проверяет Unknown, подтверждённый OFF и ручной сброс.</TraceAssertion>
       <TraceAssertion>Разбор использует тот же анализ проверенного архива, что автономная команда.</TraceAssertion>
+      <TraceAssertion>После завершения дочернего процесса под нагрузкой прежний raw не меняется. Новый процесс с тем же корнем подтверждает OFF и принимает нагрев после явных Arm и Start в новом прогоне.</TraceAssertion>
     </V-M-CVTL-DAEMON>
     <V-M-CVTL-GUI>
       <Command>npm --prefix ui run test:operator</Command>
@@ -128,6 +132,7 @@
     </V-M-CVTL-GUI>
     <V-M-CVTL-CLI>
       <Command>cargo test --locked -p cvtl-cli</Command>
+      <Command>cargo test --locked -p cvtl-cli --example m9_a1_acceptance</Command>
       <Scenario>Команды wire и heater-advisor на тестовых входах.</Scenario>
       <Scenario>Офлайн-реплей файлового журнала, пересчёт M4/M5, проверка происхождения и неполного префикса.</Scenario>
       <Scenario>Детерминированный импорт этапа I с происхождением и хэшем фактического источника.</Scenario>
@@ -137,6 +142,7 @@
         <File>crates/cvtl-cli/tests/m7_a1_replay.rs</File>
         <File>crates/cvtl-cli/tests/m8_analysis.rs</File>
         <File>crates/cvtl-cli/tests/m6_import.rs</File>
+        <File>crates/cvtl-cli/examples/m9_a1_acceptance.rs</File>
       </TestFiles>
       <TraceAssertion>Проверяются расчёт проводки, вывод области нагревателя и обработка отсутствующих данных.</TraceAssertion>
       <TraceAssertion>Повторный расчёт сравнивается с сохранёнными решениями. Ошибка кадра и неполный такт различаются, а состояние выхода требует причинно связанных ответов обеих ветвей.</TraceAssertion>
@@ -144,6 +150,7 @@
       <TraceAssertion>A1 v2 воспроизводит смену массы, scale и постоянного G. Подмена параметра или использованной кривой k(T) выявляется по пересчёту.</TraceAssertion>
       <TraceAssertion>Библиотечный реплей ограничивает окно сверенных тактов. Оба прежних CLI-отчёта v1 совпадают побайтно.</TraceAssertion>
       <TraceAssertion>Четыре отдельные синтетические записи проверяют два известных уровня, дифференциальную пару и неизмеренный приток. Анализ воспроизводим, хэши архива совпадают.</TraceAssertion>
+      <TraceAssertion>Release-пример M9 сверяет строки хоста с raw, проверяет целевые метрики §8.4, насыщение и четыре завершённых отказных прогона. При отказе writer сохраняются проверенный префикс и отдельное свидетельство обеих ветвей.</TraceAssertion>
     </V-M-CVTL-CLI>
   </VD-MAIN>
 </GraceVerificationDocument>

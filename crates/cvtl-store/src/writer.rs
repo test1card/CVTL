@@ -12,6 +12,7 @@
 //   spawn_file - start actual file worker
 //   spawn_with_sink - start writer with an injectable sink
 //   Sink - writer-side I/O and measurement boundary
+//   FileSink - standard run files and snapshot
 // END_MODULE_MAP
 //! Single file worker. Frontiers only move after their corresponding I/O succeeds.
 
@@ -244,13 +245,14 @@ impl<S: Sink> Writer<S> {
     }
 }
 
-struct FileSink {
+/// Standard run files, reusable inside writer-side sink wrappers.
+pub struct FileSink {
     raw: File,
     events: Option<File>,
 }
 
 impl FileSink {
-    fn open(path: &Path, run: &str, generation: u64, snapshot: Snapshot) -> io::Result<Self> {
+    pub fn open(path: &Path, run: &str, generation: u64, snapshot: Snapshot) -> io::Result<Self> {
         let metadata = snapshot
             .metadata(run, generation)
             .map_err(io::Error::other)?;

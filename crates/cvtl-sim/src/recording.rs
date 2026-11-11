@@ -50,6 +50,7 @@ use cvtl_safety::{
 use cvtl_store::{
     record::{self as raw, Command, Correlation, Event, Quality, Snapshot, ThermalPoint},
     session::{fault_issue, CloseResult, Failure, Receipt, Session, Status},
+    writer::{self, Sink},
 };
 
 use crate::{
@@ -218,6 +219,7 @@ pub struct RecordingLoop<'a> {
     keithley: Option<Keithley<Traced>>,
     lake: Option<LakeShore218<Traced>>,
     supervisor: Supervisor,
+    max_temperature_age: Duration,
     controller: Controller,
     journal: Session,
     trace: Rc<RefCell<Trace>>,
@@ -237,13 +239,34 @@ impl<'a> RecordingLoop<'a> {
         journal: Session,
         epoch: Instant,
     ) -> Self {
+        let profile = ProtectionProfile::test_only_example();
+        let max_temperature_age = profile.max_temperature_age;
+        Self::with_supervisor(
+            source,
+            thermometer,
+            journal,
+            epoch,
+            Supervisor::new(profile).unwrap(),
+            max_temperature_age,
+        )
+    }
+
+    fn with_supervisor(
+        source: &'a KeithleySimulator,
+        thermometer: &'a LakeShoreSim,
+        journal: Session,
+        epoch: Instant,
+        supervisor: Supervisor,
+        max_temperature_age: Duration,
+    ) -> Self {
         cvtl_core::Config::from_yaml(SETUP_YAML).expect("shipped phase A config");
         Self {
             source,
             thermometer,
             keithley: None,
             lake: None,
-            supervisor: Supervisor::new(ProtectionProfile::test_only_example()).unwrap(),
+            supervisor,
+            max_temperature_age,
             controller: controller(),
             journal,
             trace: Rc::new(RefCell::new(Trace::default())),
@@ -262,6 +285,7 @@ impl<'a> RecordingLoop<'a> {
             "test_only_m6_recording_v1",
             "m6_recording_v1",
             Some(DEMAND_W),
+            &ProtectionProfile::test_only_example(),
         )
     }
 
@@ -278,7 +302,7 @@ impl<'a> RecordingLoop<'a> {
         path: PathBuf,
         epoch: Instant,
     ) -> Result<Self, Error> {
-        Self::new_a1_profile(source, thermometer, run, path, epoch, None, None)
+        Self::new_a1_file(source, thermometer, run, path, epoch, None, None)
     }
 
     /// Create a test-only session from validated initial body and bridge parameters.
@@ -290,7 +314,7 @@ impl<'a> RecordingLoop<'a> {
         epoch: Instant,
         setup: &BodySetup,
     ) -> Result<Self, Error> {
-        Self::new_a1_profile(source, thermometer, run, path, epoch, Some(setup), None)
+        Self::new_a1_file(source, thermometer, run, path, epoch, Some(setup), None)
     }
 
     /// Create a test-only session with explicitly applied calibration heat flows.
@@ -303,7 +327,7 @@ impl<'a> RecordingLoop<'a> {
         setup: &BodySetup,
         calibration: &A1Calibration,
     ) -> Result<Self, Error> {
-        Self::new_a1_profile(
+        Self::new_a1_file(
             source,
             thermometer,
             run,
@@ -314,7 +338,32 @@ impl<'a> RecordingLoop<'a> {
         )
     }
 
-    fn new_a1_profile(
+    /// Create a loopback-only acceptance run with an explicit temperature age
+    /// and a writer-side sink factory that receives the run snapshot.
+    pub fn new_a1_acceptance<S: Sink + Send + 'static>(
+        source: &'a KeithleySimulator,
+        thermometer: &'a LakeShoreSim,
+        run: &str,
+        epoch: Instant,
+        max_temperature_age_ms: u64,
+        open: impl FnOnce(Snapshot) -> std::io::Result<S> + Send + 'static,
+    ) -> Result<Self, Error> {
+        let mut profile = ProtectionProfile::test_only_example();
+        profile.max_temperature_age = Duration::from_millis(max_temperature_age_ms);
+        Self::new_a1_with_journal(
+            source,
+            thermometer,
+            epoch,
+            None,
+            None,
+            profile,
+            |snapshot| {
+                writer::spawn_with_sink(run, 1, move || epoch.elapsed(), move || open(snapshot))
+            },
+        )
+    }
+
+    fn new_a1_file(
         source: &'a KeithleySimulator,
         thermometer: &'a LakeShoreSim,
         run: &str,
@@ -322,6 +371,26 @@ impl<'a> RecordingLoop<'a> {
         epoch: Instant,
         setup: Option<&BodySetup>,
         calibration: Option<&A1Calibration>,
+    ) -> Result<Self, Error> {
+        Self::new_a1_with_journal(
+            source,
+            thermometer,
+            epoch,
+            setup,
+            calibration,
+            ProtectionProfile::test_only_example(),
+            |snapshot| writer::spawn_file(run, 1, path, snapshot, move || epoch.elapsed()),
+        )
+    }
+
+    fn new_a1_with_journal(
+        source: &'a KeithleySimulator,
+        thermometer: &'a LakeShoreSim,
+        epoch: Instant,
+        setup: Option<&BodySetup>,
+        calibration: Option<&A1Calibration>,
+        profile: ProtectionProfile,
+        spawn: impl FnOnce(Snapshot) -> Result<Session, Failure>,
     ) -> Result<Self, Error> {
         let (a1, scenario) = match (setup, calibration) {
             (Some(setup), Some(calibration)) => (
@@ -339,16 +408,24 @@ impl<'a> RecordingLoop<'a> {
                 ))
             }
         };
-        let mut snapshot = Self::snapshot_for(scenario, scenario, None);
+        let mut snapshot = Self::snapshot_for(scenario, scenario, None, &profile);
         A1Scenario::snapshot_parameters(&mut snapshot, setup, calibration)
             .map_err(Error::Scenario)?;
+        let max_temperature_age = profile.max_temperature_age;
+        let supervisor = Supervisor::new(profile)
+            .map_err(|_| Error::Scenario("Недопустимый профиль защит A1".into()))?;
         thermometer
             .set_temperatures(a1.temperatures())
             .map_err(InstrumentError::Io)?;
-        let journal =
-            cvtl_store::writer::spawn_file(run, 1, path, snapshot, move || epoch.elapsed())
-                .map_err(Error::Journal)?;
-        let mut owner = Self::new(source, thermometer, journal, epoch);
+        let journal = spawn(snapshot).map_err(Error::Journal)?;
+        let mut owner = Self::with_supervisor(
+            source,
+            thermometer,
+            journal,
+            epoch,
+            supervisor,
+            max_temperature_age,
+        );
         owner.a1 = Some(a1);
         Ok(owner)
     }
@@ -378,7 +455,12 @@ impl<'a> RecordingLoop<'a> {
         }
     }
 
-    fn snapshot_for(scenario: &str, yaml_scenario: &str, requested_w: Option<f64>) -> Snapshot {
+    fn snapshot_for(
+        scenario: &str,
+        yaml_scenario: &str,
+        requested_w: Option<f64>,
+        profile: &ProtectionProfile,
+    ) -> Snapshot {
         let mut yaml = String::from("hardware_enabled: false\nphase_a_config:\n");
         for line in SETUP_YAML.lines() {
             yaml.push_str("  ");
@@ -387,7 +469,6 @@ impl<'a> RecordingLoop<'a> {
         }
         let source = test_only_source_config();
         let control = test_only_control_config();
-        let profile = ProtectionProfile::test_only_example();
         use std::fmt::Write;
         write!(
             &mut yaml,
@@ -409,7 +490,7 @@ impl<'a> RecordingLoop<'a> {
         control.pi[0].kp, control.pi[0].ki.get(), control.total_limit.get(), control.max_sample_age.get(), MARGIN, SLEW_W_PER_S).unwrap();
         let pi = control.pi[0];
         let channel = control.branches[0];
-        let head = profile.head;
+        let head = &profile.head;
         write!(&mut yaml, concat!(
             "  pi: {{integral_limit_w: {}, r_initial_ohm: {}, r_min_ohm: {}, r_max_ohm: {}, r_tau_s: {}, min_current_a: {}, quantum: null, derivative: null}}\n",
             "  heater: {{loop_ohm: {}, limit_w: {}}}\n",
@@ -515,7 +596,7 @@ impl<'a> RecordingLoop<'a> {
         self.require_journal(correlation)?;
         let mut frame = self.acquire(Instant::now(), Duration::ZERO, false);
         let held = if let Some(a1) = &self.a1 {
-            let held = HeldTf::from_inputs(&frame.input, a1_max_age());
+            let held = HeldTf::from_inputs(&frame.input, self.max_temperature_age);
             if a1.failed || (frame.monitor.thermometer_connected && held.is_none()) {
                 invalidate_model(&mut frame);
             }
@@ -573,8 +654,9 @@ impl<'a> RecordingLoop<'a> {
             if a1.failed {
                 invalidate_model(&mut frame);
             } else if let Some(step) = step {
-                if let Some((held, requested)) = HeldTf::from_inputs(&frame.input, a1_max_age())
-                    .and_then(|held| a1.demand(held).map(|requested| (held, requested)))
+                if let Some((held, requested)) =
+                    HeldTf::from_inputs(&frame.input, self.max_temperature_age)
+                        .and_then(|held| a1.demand(held).map(|requested| (held, requested)))
                 {
                     a1.held = Some(held);
                     frame.input.demand = raw::Demand::VirtualBody {
@@ -672,7 +754,7 @@ impl<'a> RecordingLoop<'a> {
             .ok()
             .and_then(|interval| {
                 let interval_end_ns = ns(interval.ended_at.checked_duration_since(self.epoch)?);
-                let step = a1.advance(interval, interval_end_ns, a1_max_age())?;
+                let step = a1.advance(interval, interval_end_ns, self.max_temperature_age)?;
                 self.thermometer.set_temperatures(a1.temperatures()).ok()?;
                 Some(step)
             });
@@ -1165,9 +1247,6 @@ fn quality(result: Result<(), &InstrumentError>) -> Quality {
 
 fn temperature_time(reading: TemperatureReading) -> Instant {
     reading.measurement_time.unwrap_or(reading.started)
-}
-fn a1_max_age() -> Duration {
-    ProtectionProfile::test_only_example().max_temperature_age
 }
 fn invalidate_model(frame: &mut Frame) {
     frame.monitor.model_valid = false;
