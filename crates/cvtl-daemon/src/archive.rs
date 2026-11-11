@@ -14,7 +14,7 @@
 //   review - compare a receipt to a verified raw prefix
 // END_MODULE_MAP
 
-use cvtl_cli::{check_archive, ArchiveReplay};
+use cvtl_cli::{inspect_archive, AnalysisReport, ArchiveReplay, CompletionReceipt as Receipt};
 use cvtl_safety::machine::OutputState;
 use cvtl_store::{record::MAX_RUN_HEADER_BYTES, session::Completed};
 use serde::{Deserialize, Serialize};
@@ -29,22 +29,6 @@ use crate::scenario::{FixturePart, Setup, Wire};
 
 const RECEIPT_FILE: &str = "completed.json";
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Deserialize, Serialize)]
-pub(crate) struct Receipt {
-    run: String,
-    generation: u64,
-    last_seq: u64,
-    output_state: ReceiptOutputState,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ReceiptOutputState {
-    Unknown,
-    OffVerified,
-    OnVerified,
-}
 
 #[derive(Deserialize, Serialize)]
 struct Diagnostics {
@@ -63,6 +47,7 @@ pub(crate) struct Review {
     #[serde(flatten)]
     replay: ArchiveReplay,
     receipt_verified: bool,
+    analysis: AnalysisReport,
     #[serde(flatten)]
     saved: SavedReceipt,
 }
@@ -83,11 +68,7 @@ pub(crate) fn save(
             run: run.into(),
             generation: completed.generation,
             last_seq: completed.last_seq,
-            output_state: match output {
-                OutputState::Unknown => ReceiptOutputState::Unknown,
-                OutputState::OffVerified => ReceiptOutputState::OffVerified,
-                OutputState::OnVerified => ReceiptOutputState::OnVerified,
-            },
+            output_state: output.into(),
         },
         diagnostics: Diagnostics {
             wiring: setup.wiring.clone(),
@@ -143,17 +124,12 @@ pub(crate) fn list(root: &Path) -> Result<Vec<Receipt>, String> {
 pub(crate) fn review(root: &Path, run: &str) -> Result<Review, String> {
     let dir = run_dir(root, run)?;
     let saved = read_receipt(&dir, run)?;
-    let replay = check_archive(&dir)?;
-    let receipt = &saved.receipt;
-    let report = &replay.report;
-    let receipt_verified = replay.raw_matches_profile
-        && report.run == receipt.run
-        && report.generation == receipt.generation
-        && report.raw_verified_records == receipt.last_seq
-        && report.raw_tail == "frame_boundary";
+    let (replay, analysis) = inspect_archive(&dir, &saved.receipt)?;
+    let receipt_verified = saved.receipt.matches_raw(&replay);
     Ok(Review {
         replay,
         receipt_verified,
+        analysis,
         saved,
     })
 }

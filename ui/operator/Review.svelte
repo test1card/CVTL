@@ -1,6 +1,6 @@
 <script lang="ts">
   import Plot from "./Plot.svelte";
-  import type { ArchiveReceipt, ArchiveReview, PlotSeries, Theme } from "./types";
+  import type { AnalysisEstimate, ArchiveReceipt, ArchiveReview, PlotSeries, Theme } from "./types";
 
   interface Props {
     archives: ArchiveReceipt[];
@@ -25,6 +25,8 @@
   let secondResult = $derived(mainResult && comparison?.report.run === secondRun ? comparison : null);
 
   const count = new Intl.NumberFormat("ru-RU");
+  const quantity = new Intl.NumberFormat("ru-RU", { maximumSignificantDigits: 5 });
+  const seconds = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 3 });
   const statuses: Record<string, string> = {
     matched: "Совпадает",
     insufficient: "Недостаточно данных",
@@ -104,6 +106,69 @@
   {/if}
 </section>
 
+{#snippet interval(estimate: AnalysisEstimate, units: string)}
+  <span class="analysis-note">5–95 % · {quantity.format(estimate.p05)} … {quantity.format(estimate.p95)}&nbsp;<span class="analysis-units">{units}</span></span>
+{/snippet}
+
+{#snippet derivative(estimate: AnalysisEstimate, point: string)}
+  <div>
+    <dt>Производная {point}</dt>
+    <dd>
+      {quantity.format(estimate.nominal)} К/с
+      <span class="analysis-note" title="Стандартная неопределённость">σ {quantity.format(estimate.std_dev)} К/с</span>
+      {@render interval(estimate, "К/с")}
+    </dd>
+  </div>
+{/snippet}
+
+{#snippet coolingAnalysis(data: ArchiveReview)}
+  {@const analysis = data.analysis}
+  {@const window = analysis.window}
+  {@const estimate = analysis.q2_eff_w}
+  <section class="analysis-result" data-testid="analysis-result" data-status={analysis.status} aria-label="Анализ холодопроизводительности">
+    <h4>Холодопроизводительность Q2_eff</h4>
+    {#if analysis.profile === "synthetic_test_only_a1"}
+      <p class="muted">Синтетический профиль A1 · test_only</p>
+    {/if}
+    {#if estimate && window}
+      <dl class="review-metrics">
+        <div>
+          <dt>Q2_eff · медиана</dt>
+          <dd>
+            <span data-testid="q2-estimate" data-value={estimate.median}>{quantity.format(estimate.median)} Вт</span>
+            {@render interval(estimate, "Вт")}
+          </dd>
+        </div>
+        <div>
+          <dt>Окно модели</dt>
+          <dd>
+            {seconds.format(window.start_s)} … {seconds.format(window.end_s)} с
+            <span class="analysis-note">Интервалов {count.format(window.intervals)}</span>
+          </dd>
+        </div>
+        <div>
+          <dt>Средняя мощность нагревателей</dt>
+          <dd>{quantity.format(window.mean_heater_w)} Вт</dd>
+        </div>
+        <div>
+          <dt>Средние температуры</dt>
+          <dd class="analysis-temperatures">
+            {#each ["stage1", "stage2", "tf", "jacket"] as point, index}
+              <span>{point} {quantity.format(window.mean_temperatures_k[index])} К</span>
+            {/each}
+          </dd>
+        </div>
+        {@render derivative(window.derivative_stage2_k_per_s, "stage2")}
+        {@render derivative(window.derivative_tf_k_per_s, "tf")}
+      </dl>
+      <p class="muted">Производные оценены при {seconds.format(window.derivative_at_s)} с модельного времени.</p>
+    {:else}
+      <p class="review-diagnostic"><span aria-hidden="true">!&nbsp;</span>{analysis.status}</p>
+      {#if analysis.reason}<p>{analysis.reason}</p>{/if}
+    {/if}
+  </section>
+{/snippet}
+
 {#snippet runReport(data: ArchiveReview, heading: string, testid: string)}
   {@const report = data.report}
   {@const firstSample = data.samples[0]}
@@ -169,6 +234,7 @@
     {#if report.first_diagnostic}
       <p class="review-diagnostic"><span aria-hidden="true">! </span>{report.first_diagnostic.message}</p>
     {/if}
+    {@render coolingAnalysis(data)}
     {#if time.length > 0}
       <p class="muted">Время от начала прогона, с</p>
       <div class="review-plots">
@@ -188,8 +254,6 @@
     {/if}
   </div>
 {/if}
-
-<p class="muted review-availability">Q2_eff и неопределённость ожидают расчёта M8.</p>
 
 <style>
   .review-controls,
@@ -251,8 +315,33 @@
     color: var(--warning);
   }
 
-  .review-availability {
+  .analysis-result {
     margin: 1rem 0;
+    padding-top: .85rem;
+    border-top: 1px solid var(--line);
+    overflow-wrap: anywhere;
+  }
+
+  .analysis-result h4 {
+    margin: 0;
+  }
+
+  .analysis-note {
+    display: block;
+    margin-top: .2rem;
+    color: var(--muted);
+    font-size: .85rem;
+    font-weight: 400;
+  }
+
+  .analysis-units {
+    white-space: nowrap;
+  }
+
+  .analysis-temperatures {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .15rem .7rem;
   }
 
   @media (min-width: 1000px) {

@@ -84,6 +84,7 @@
       <TraceAssertion>Фактическая энергия сохраняется при потере чтения. Замкнутый A1 фиксирует шаг головы, удержанное tf, изменение scale и моста. Просроченное tf блокирует модельный шаг и Drive. Для повторного пуска после потери связи нужны подтверждённый OFF и действия оператора.</TraceAssertion>
       <TraceAssertion>Номинальный A1 v1 сохраняет сценарий 20 кг и исходный формат снимка. Настраиваемый A1 v2 проходит файловые проверки в CLI.</TraceAssertion>
       <TraceAssertion>Короткий прогноз совпадает с эталоном первого теплового шага. Знаковый поток сохраняется, идеальный нагрев ограничен.</TraceAssertion>
+      <TraceAssertion>Калибровочный профиль записывает применённую границу и скрывает эталон отвода. Все четыре запуска закрывают журнал после подтверждённого OFF.</TraceAssertion>
     </V-M-CVTL-SIM>
     <V-M-CVTL-STORE>
       <Command>cargo test --locked -p cvtl-store</Command>
@@ -99,11 +100,14 @@
     </V-M-CVTL-STORE>
     <V-M-CVTL-ANALYSIS>
       <Command>cargo test --locked -p cvtl-analysis --test stage_i</Command>
+      <Command>cargo test --locked -p cvtl-analysis --test m8</Command>
       <Scenario>Импорт фактической транскрипции ТЗ, проверка строк и проекция штатных опор.</Scenario>
       <TestFiles>
         <File>crates/cvtl-analysis/tests/stage_i.rs</File>
+        <File>crates/cvtl-analysis/tests/m8.rs</File>
       </TestFiles>
       <TraceAssertion>Ступени сопоставляются явно, неизвестный ток остаётся неизвестным, производный CSV совпадает с опорами 1–6.</TraceAssertion>
+      <TraceAssertion>Энергетический баланс, наклоны на неравномерных временах и неопределённость сверяются с аналитикой. Парная оценка требует различимости, скрытый приток оставляет Q2 неопределённым.</TraceAssertion>
     </V-M-CVTL-ANALYSIS>
     <V-M-CVTL-DAEMON>
       <Command>cargo run --locked -p cvtl-daemon -- config/simulator.yaml</Command>
@@ -113,12 +117,14 @@
       <TestFiles><File>crates/cvtl-daemon/tests/operator_http.rs</File></TestFiles>
       <TraceAssertion>Запуск с конфигом поставки завершает проверку без обращения к оборудованию.</TraceAssertion>
       <TraceAssertion>Демон отклоняет чужие Host и Origin, некорректное тело и устаревшую команду. Stop снимает ожидающее действие. Реальный HTTP-прогон проверяет Unknown, подтверждённый OFF и ручной сброс.</TraceAssertion>
+      <TraceAssertion>Разбор использует тот же анализ проверенного архива, что автономная команда.</TraceAssertion>
     </V-M-CVTL-DAEMON>
     <V-M-CVTL-GUI>
       <Command>npm --prefix ui run test:operator</Command>
       <Scenario>Пять экранов через реальный локальный демон с записью A1, сравнением двух прогонов и отказом источника.</Scenario>
       <TestFiles><File>ui/scripts/operator-test.mjs</File></TestFiles>
       <TraceAssertion>Playwright проверяет применение параметров по seq, окно 240 после не менее 250 тактов, OFF, реплей, отображение сбоя сохранения квитанции, две темы, 360 и 1280 CSS px, нестандартную локаль и локальность запросов.</TraceAssertion>
+      <TraceAssertion>Результат M8 в браузере совпадает с CLI. Длинное окно покрывает известный отвод, короткая запись даёт статус «не определяется».</TraceAssertion>
     </V-M-CVTL-GUI>
     <V-M-CVTL-CLI>
       <Command>cargo test --locked -p cvtl-cli</Command>
@@ -129,6 +135,7 @@
         <File>crates/cvtl-cli/tests/m2_cli.rs</File>
         <File>crates/cvtl-cli/tests/m6_replay.rs</File>
         <File>crates/cvtl-cli/tests/m7_a1_replay.rs</File>
+        <File>crates/cvtl-cli/tests/m8_analysis.rs</File>
         <File>crates/cvtl-cli/tests/m6_import.rs</File>
       </TestFiles>
       <TraceAssertion>Проверяются расчёт проводки, вывод области нагревателя и обработка отсутствующих данных.</TraceAssertion>
@@ -136,6 +143,7 @@
       <TraceAssertion>A1 пересчитывает тепловые шаги, dH и запрос по архивному каталогу и удержанному tf. Потеря источника с Unknown, восстановленный OFF и повторный ручной запуск сверяются по последовательности событий.</TraceAssertion>
       <TraceAssertion>A1 v2 воспроизводит смену массы, scale и постоянного G. Подмена параметра или использованной кривой k(T) выявляется по пересчёту.</TraceAssertion>
       <TraceAssertion>Библиотечный реплей ограничивает окно сверенных тактов. Оба прежних CLI-отчёта v1 совпадают побайтно.</TraceAssertion>
+      <TraceAssertion>Четыре отдельные синтетические записи проверяют два известных уровня, дифференциальную пару и неизмеренный приток. Анализ воспроизводим, хэши архива совпадают.</TraceAssertion>
     </V-M-CVTL-CLI>
   </VD-MAIN>
 </GraceVerificationDocument>

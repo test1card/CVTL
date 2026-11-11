@@ -60,11 +60,19 @@ impl BodySetup {
             self.scale,
             unit(Kelvin::new(self.temperature_k))?,
         )?;
-        let bridge = match &self.bridge {
-            BridgeSetup::Constant {
+        let bridge = self.bridge.build(catalog)?;
+        bridge.flow(body.temperature(), initial_tf)?;
+        Ok((body, bridge))
+    }
+}
+
+impl BridgeSetup {
+    pub fn build(&self, catalog: &str) -> Result<Bridge> {
+        Ok(match self {
+            Self::Constant {
                 conductance_w_per_k,
             } => Bridge::Constant(unit(WattsPerKelvin::new(*conductance_w_per_k))?),
-            BridgeSetup::Conductor {
+            Self::Conductor {
                 material: id,
                 area_m2,
                 length_m,
@@ -73,13 +81,13 @@ impl BodySetup {
                 area: unit(SquareMeters::new(*area_m2))?,
                 length: unit(Meters::new(*length_m))?,
             },
-            BridgeSetup::Table { points } => Bridge::Table(
+            Self::Table { points } => Bridge::Table(
                 points
                     .iter()
                     .map(|&[t, g]| Ok((unit(Kelvin::new(t))?, unit(WattsPerKelvin::new(g))?)))
                     .collect::<Result<_>>()?,
             ),
-            BridgeSetup::Series {
+            Self::Series {
                 contact_w_per_k,
                 material: id,
                 area_m2,
@@ -90,8 +98,6 @@ impl BodySetup {
                 area: unit(SquareMeters::new(*area_m2))?,
                 length: unit(Meters::new(*length_m))?,
             },
-        };
-        bridge.flow(body.temperature(), initial_tf)?;
-        Ok((body, bridge))
+        })
     }
 }

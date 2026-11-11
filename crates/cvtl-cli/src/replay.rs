@@ -2,8 +2,8 @@
 // VERSION: 0.1.0
 // START_MODULE_CONTRACT
 //   PURPOSE: Recompute a verified recording offline
-//   SCOPE: Logical operations, causal evidence and comparison report for v1 and A1
-//   DEPENDS: M-CVTL-STORE, M-CVTL-CONTROL, M-CVTL-SAFETY
+//   SCOPE: Logical operations, causal evidence and thermal analysis inputs for A1
+//   DEPENDS: M-CVTL-STORE, M-CVTL-CONTROL, M-CVTL-SAFETY, M-CVTL-ANALYSIS
 //   LINKS: M-CVTL-CLI
 //   ROLE: RUNTIME
 //   MAP_MODE: EXPORTS
@@ -11,6 +11,7 @@
 // START_MODULE_MAP
 //   run - read-only replay command
 //   check_archive - read a bounded archive and return its verified timeline
+//   check_thermal - project recorded intervals after successful replay checks
 //   TimelineSample - accepted input and control data for one plotted tick
 // END_MODULE_MAP
 //! Recompute decisions offline and compare them to the verified raw stream.
@@ -20,6 +21,7 @@ mod profile;
 
 use std::{collections::VecDeque, io::Read, path::Path, process::ExitCode, time::Duration};
 
+use cvtl_analysis::m8::{Interval, Model, MAX_INTERVALS};
 use cvtl_control::{pi::PowerSample, Demand, HeatPermit, Tick, TimedPowerSample};
 use cvtl_core::units::{Amperes, Kelvin, Seconds, Volts, Watts};
 use cvtl_safety::{
@@ -195,6 +197,12 @@ pub struct Report {
     a1: Option<a1::Summary>,
 }
 
+impl Report {
+    pub(crate) fn is_matched_off(&self) -> bool {
+        matches!(self.status, Status::Matched) && self.output_state_at_boundary == "off_verified"
+    }
+}
+
 #[derive(Serialize)]
 pub struct ArchiveReplay {
     pub report: Report,
@@ -205,8 +213,16 @@ pub struct ArchiveReplay {
     pub raw_matches_profile: bool,
 }
 
+pub(crate) struct CheckedThermal {
+    pub archive: ArchiveReplay,
+    pub model: Result<Model, String>,
+    pub intervals: Vec<Interval>,
+    pub capture_error: Option<String>,
+}
+
 pub fn run(dir: &Path) -> Result<(String, ExitCode), String> {
-    let report = compare(dir, false)?.report;
+    let (archive, _) = compare(dir, Projection::Report)?;
+    let report = archive.report;
     let code = if matches!(report.status, Status::Matched) {
         ExitCode::SUCCESS
     } else {
@@ -218,11 +234,33 @@ pub fn run(dir: &Path) -> Result<(String, ExitCode), String> {
 }
 
 pub fn check_archive(dir: &Path) -> Result<ArchiveReplay, String> {
-    compare(dir, true)
+    compare(dir, Projection::Archive).map(|(archive, _)| archive)
 }
 
-fn compare(dir: &Path, archive: bool) -> Result<ArchiveReplay, String> {
-    let profile = profile::load(dir)?;
+pub(crate) fn check_thermal(dir: &Path) -> Result<CheckedThermal, String> {
+    let (archive, capture) = compare(dir, Projection::Thermal)?;
+    let capture = capture.expect("thermal projection has a capture");
+    Ok(CheckedThermal {
+        archive,
+        model: capture.model,
+        intervals: capture.intervals,
+        capture_error: capture.error,
+    })
+}
+
+enum Projection {
+    Report,
+    Archive,
+    Thermal,
+}
+
+fn compare(
+    dir: &Path,
+    projection: Projection,
+) -> Result<(ArchiveReplay, Option<ThermalCapture>), String> {
+    let archive = !matches!(projection, Projection::Report);
+    let mut profile = profile::load(dir, matches!(projection, Projection::Thermal))?;
+    let thermal = profile.analysis_model.take().map(ThermalCapture::new);
     let mut replay = Replay {
         profile,
         operation: None,
@@ -233,6 +271,7 @@ fn compare(dir: &Path, archive: bool) -> Result<ArchiveReplay, String> {
         verified_output: OutputState::Unknown,
         last_verified_seq: 0,
         samples: archive.then(VecDeque::new),
+        thermal,
     };
     let mut raw = profile::open_file(&dir.join("raw.ndjson.zst"))?;
     let limit = if archive {
@@ -304,13 +343,51 @@ fn compare(dir: &Path, archive: bool) -> Result<ArchiveReplay, String> {
         a1: replay.profile.a1.map(|thermal| thermal.summary),
     };
     let samples = replay.samples.unwrap_or_default();
-    Ok(ArchiveReplay {
+    let archive = ArchiveReplay {
         omitted_ticks: replay.replayed - samples.len() as u64,
         last_verified_seq: replay.last_verified_seq,
         raw_matches_profile,
         samples,
         report,
-    })
+    };
+    Ok((archive, replay.thermal))
+}
+
+struct ThermalCapture {
+    model: Result<Model, String>,
+    intervals: Vec<Interval>,
+    missing_step: bool,
+    error: Option<String>,
+}
+
+impl ThermalCapture {
+    fn new(model: Result<Model, String>) -> Self {
+        Self {
+            model,
+            intervals: Vec::new(),
+            missing_step: false,
+            error: None,
+        }
+    }
+
+    fn observe(&mut self, frame: &Frame, end: Option<u64>, eligible: bool) {
+        if self.error.is_some() {
+            return;
+        }
+        if let Some(interval) =
+            end.and_then(|end| frame.thermal_interval(end, eligible && !self.missing_step))
+        {
+            if self.intervals.len() == MAX_INTERVALS {
+                self.error = Some("Число тепловых интервалов превышает предел анализа".into());
+            } else {
+                self.intervals.push(interval);
+                self.missing_step = false;
+            }
+        } else if !self.intervals.is_empty() {
+            // No recorded endpoint connects the next interval across this tick.
+            self.missing_step = true;
+        }
+    }
 }
 
 struct Replay {
@@ -323,6 +400,7 @@ struct Replay {
     verified_output: OutputState,
     last_verified_seq: u64,
     samples: Option<VecDeque<TimelineSample>>,
+    thermal: Option<ThermalCapture>,
 }
 impl Replay {
     fn row(&mut self, row: Record<'_>) {
@@ -509,6 +587,13 @@ impl Replay {
             thermal.verify_boundary(end);
         }
         if let Correlation::Tick(id) = op.id {
+            if let (Some(capture), Some(frame)) = (&mut self.thermal, &op.input) {
+                capture.observe(
+                    frame,
+                    thermal_end,
+                    self.profile.supervisor.fault_reason().is_none(),
+                );
+            }
             self.replayed += 1;
             self.last_tick = Some(id);
         }
@@ -906,6 +991,35 @@ impl Frame {
         self.monitor.monotonic.as_nanos() as u64
     }
 
+    fn thermal_interval(&self, end_ns: u64, eligible: bool) -> Option<Interval> {
+        let thermal = self.thermal?;
+        let step = thermal.step?;
+        let begin_ns = end_ns.checked_sub(step.interval_ns)?;
+        let valid = eligible
+            && self.monitor.model_valid
+            && self.monitor.source_connected
+            && self
+                .tick
+                .branches_available
+                .into_iter()
+                .all(|available| available)
+            && self.monitor.thermometer_connected
+            && self.monitor.journal_ok
+            && !self.monitor.missed_tick
+            && !self.monitor.queue_fault;
+        let end_k = if valid {
+            thermal.verified_temperatures(end_ns, self.measured_ns())
+        } else {
+            None
+        };
+        Some(Interval {
+            begin_ns,
+            end_ns,
+            heater_energy_j: step.heater_energy_j,
+            end_k,
+        })
+    }
+
     fn from_raw(seq: u64, frame: &Inputs<'_>, a1: bool) -> Result<Self, String> {
         if frame.power.map(|row| row.channel) != CHANNELS
             || frame.temperatures.map(|row| row.point)
@@ -980,7 +1094,7 @@ impl Frame {
                 dt: seconds(Duration::from_nanos(frame.dt_ns)),
             },
             thermal: a1.then_some(a1::ThermalInput {
-                tf: frame.temperatures[2],
+                temperatures: frame.temperatures,
                 step: frame.a1_step_v1,
             }),
         })
@@ -1489,6 +1603,71 @@ mod tests {
         let sample = TimelineSample::from_inputs(9, 45, &inputs);
         assert_eq!(sample.tracking_error_w, Some(0.5));
         assert_eq!(sample.bridge_flow_w, None);
+    }
+
+    #[test]
+    fn thermal_projection_uses_model_boundary_and_preserves_unusable_observations() {
+        let mut frame = thermal_frame();
+        let projected = frame.thermal_interval(150, true).unwrap();
+        assert_eq!((projected.begin_ns, projected.end_ns), (50, 150));
+        assert_eq!(projected.heater_energy_j, [0.01, 0.02]);
+        assert_eq!(projected.end_k, Some([45.0, 15.0, 16.0, 77.0]));
+        assert!(frame.thermal_interval(150, false).unwrap().end_k.is_none());
+
+        frame.thermal.as_mut().unwrap().temperatures[3].read_finished_ns = Some(181);
+        assert!(frame.thermal_interval(150, true).unwrap().end_k.is_none());
+        frame = thermal_frame();
+        frame.thermal.as_mut().unwrap().temperatures[0].read_started_ns = Some(149);
+        assert!(frame.thermal_interval(150, true).unwrap().end_k.is_none());
+        frame = thermal_frame();
+        frame.thermal.as_mut().unwrap().temperatures[2].channel = Some(4);
+        assert!(frame.thermal_interval(150, true).unwrap().end_k.is_none());
+        frame = thermal_frame();
+        frame.monitor.missed_tick = true;
+        assert!(frame.thermal_interval(150, true).unwrap().end_k.is_none());
+    }
+
+    #[test]
+    fn thermal_capture_marks_gaps_and_reports_its_own_interval_limit() {
+        let frame = thermal_frame();
+        let mut capture = ThermalCapture::new(Err("model unavailable".into()));
+        capture.observe(&frame, Some(150), true);
+        capture.observe(&frame, None, true);
+        capture.observe(&frame, Some(150), true);
+        assert_eq!(capture.intervals.len(), 2);
+        assert!(capture.intervals[1].end_k.is_none());
+        for _ in 2..cvtl_analysis::m8::MAX_INTERVALS {
+            capture.observe(&frame, Some(150), true);
+        }
+        assert!(capture.error.is_none());
+        capture.observe(&frame, Some(150), true);
+        assert!(capture.error.is_some());
+        assert_eq!(capture.intervals.len(), cvtl_analysis::m8::MAX_INTERVALS);
+    }
+
+    fn thermal_frame() -> Frame {
+        let mut raw = plotting_inputs();
+        raw.measured_ns = 180;
+        for row in &mut raw.power {
+            row.quality = Quality::Measured;
+            row.target_w = Some(0.0);
+            row.read_started_ns = Some(151);
+            row.read_finished_ns = Some(154);
+        }
+        for (index, (sample, temperature)) in raw
+            .temperatures
+            .iter_mut()
+            .zip([45.0, 15.0, 16.0, 77.0])
+            .enumerate()
+        {
+            sample.channel = Some(index as u8 + 1);
+            sample.quality = Quality::Measured;
+            sample.temperature_k = Some(temperature);
+            sample.read_started_ns = Some(155 + 5 * index as u64);
+            sample.read_finished_ns = Some(159 + 5 * index as u64);
+        }
+        raw.a1_step_v1.as_mut().unwrap().heater_energy_j = [0.01, 0.02];
+        Frame::from_raw(1, &raw, true).unwrap()
     }
 
     fn plotting_inputs() -> Inputs<'static> {

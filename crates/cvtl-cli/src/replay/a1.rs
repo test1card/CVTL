@@ -10,7 +10,7 @@
 // END_MODULE_CONTRACT
 // START_MODULE_MAP
 //   ThermalReplay - one state of the replayed virtual body and bridge
-//   ThermalInput - raw tf observation and optional step
+//   ThermalInput - raw A1 thermometry and optional step
 //   Parameters - recorded initial body parameters
 //   Summary - verified thermal prefix
 // END_MODULE_MAP
@@ -69,8 +69,28 @@ pub(super) struct ConfiguredParameters {
 
 #[derive(Clone, Copy)]
 pub(super) struct ThermalInput {
-    pub tf: TemperatureSample,
+    pub temperatures: [TemperatureSample; 4],
     pub step: Option<A1StepV1>,
+}
+
+impl ThermalInput {
+    pub(super) fn verified_temperatures(&self, end_ns: u64, measured_ns: u64) -> Option<[f64; 4]> {
+        let read = |index: usize| {
+            let sample = self.temperatures[index];
+            let started = sample.read_started_ns?;
+            let finished = sample.read_finished_ns?;
+            let temperature = sample.temperature_k?;
+            (sample.quality == Quality::Measured
+                && sample.channel == Some(index as u8 + 1)
+                && temperature.is_finite()
+                && temperature > 0.0
+                && end_ns <= started
+                && started <= finished
+                && finished <= measured_ns)
+                .then_some(temperature)
+        };
+        Some([read(0)?, read(1)?, read(2)?, read(3)?])
+    }
 }
 
 #[derive(Clone, Copy, Default, Serialize)]
@@ -282,7 +302,7 @@ impl ThermalReplay {
     }
 
     fn observe_tf(&self, frame: &Frame) -> Option<Held> {
-        let tf = frame.thermal?.tf;
+        let tf = frame.thermal?.temperatures[2];
         let started_ns = tf.read_started_ns?;
         let age = Duration::from_nanos(frame.measured_ns().checked_sub(started_ns)?);
         let temperature = Kelvin::new(tf.temperature_k?)?;

@@ -9,6 +9,9 @@
 //   MAP_MODE: EXPORTS
 // END_MODULE_CONTRACT
 // START_MODULE_MAP
+//   analyze_archive - cooling estimate for a verified run or pair
+//   inspect_archive - shared verified replay and analysis for the daemon
+//   CompletionReceipt - persisted completion proof
 //   run_replay - CLI replay with stable output and exit status
 //   check_archive - replay report with bounded verified samples
 //   ArchiveReplay - replay result and proof of the checked prefix
@@ -17,8 +20,11 @@
 //   quantity - convert optional finite quantities for CLI commands
 // END_MODULE_MAP
 
+mod analysis;
 mod replay;
 
+pub use analysis::{analyze_archive, inspect_archive, CompletionReceipt, ReceiptOutputState};
+pub use cvtl_analysis::m8::Report as AnalysisReport;
 pub use replay::{check_archive, run as run_replay, ArchiveReplay, TimelineSample, TIMELINE_LIMIT};
 
 #[doc(hidden)]

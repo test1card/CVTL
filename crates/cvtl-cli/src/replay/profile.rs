@@ -2,8 +2,8 @@
 // VERSION: 0.1.0
 // START_MODULE_CONTRACT
 //   PURPOSE: Load and validate the recorded offline profile
-//   SCOPE: Verify identity and digests, construct existing controller and supervisor
-//   DEPENDS: M-CVTL-CORE, M-CVTL-CONTROL, M-CVTL-SAFETY, M-CVTL-STORE
+//   SCOPE: Verify identity and digests, load control and thermal boundary parameters
+//   DEPENDS: M-CVTL-CORE, M-CVTL-CONTROL, M-CVTL-SAFETY, M-CVTL-STORE, M-CVTL-PHYSICS, M-CVTL-ANALYSIS
 //   LINKS: M-CVTL-CLI
 //   ROLE: RUNTIME
 //   MAP_MODE: EXPORTS
@@ -20,6 +20,7 @@ use std::{
     time::Duration,
 };
 
+use cvtl_analysis::m8::{AppliedWire, Model};
 use cvtl_control::{allocation::Allocator, pi::PiConfig, ControlConfig, Controller};
 use cvtl_core::{
     units::{
@@ -28,6 +29,7 @@ use cvtl_core::{
     Config,
 };
 use cvtl_envelope::{ChannelSpec, Margins, ResistanceRange};
+use cvtl_physics::scenario::BridgeSetup;
 use cvtl_safety::{
     monitor::{HeadProfile, ProtectionProfile},
     supervisor::Supervisor,
@@ -134,11 +136,40 @@ struct Head {
     max_rate_k_per_s: f64,
 }
 
+#[derive(Deserialize)]
+struct AnalysisBoundary {
+    head_temperature_k: [f64; 3],
+    head_capacity_j_per_k: [f64; 3],
+    head_links_w_per_k: [f64; 2],
+    jacket_k: f64,
+    #[serde(default = "AnalysisTerms::legacy")]
+    m8: AnalysisTerms,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnalysisTerms {
+    other_w: Option<f64>,
+    wire: Option<BridgeSetup>,
+    group: Option<String>,
+}
+
+impl AnalysisTerms {
+    fn legacy() -> Self {
+        Self {
+            other_w: Some(0.0),
+            wire: None,
+            group: None,
+        }
+    }
+}
+
 pub(super) struct Profile {
     pub meta: Meta,
     pub controller: Controller,
     pub supervisor: Supervisor,
     pub a1: Option<ThermalReplay>,
+    pub analysis_model: Option<Result<Model, String>>,
     test_only: TestOnly,
 }
 
@@ -148,7 +179,7 @@ impl Profile {
     }
 }
 
-pub(super) fn load(run: &Path) -> Result<Profile, String> {
+pub(super) fn load(run: &Path, analysis: bool) -> Result<Profile, String> {
     if !fs::symlink_metadata(run).is_ok_and(|meta| meta.file_type().is_dir()) {
         return Err(format!(
             "Ожидается локальный каталог прогона: {}",
@@ -194,12 +225,13 @@ pub(super) fn load(run: &Path) -> Result<Profile, String> {
     {
         return Err("Неподдерживаемый профиль параметров REPLAY v1".into());
     }
-    let a1 = if expected_profile != PROFILE {
+    let (a1, analysis_model) = if expected_profile != PROFILE {
         let parameters = test
             .a1
             .take()
             .ok_or("Отсутствуют параметры теплового профиля A1")?;
         let catalog = catalog.ok_or("Отсутствует архивный каталог nist_csv")?;
+        let model = analysis.then(|| analysis_model(parameters.clone(), &catalog));
         let age = test.safety.max_temperature_age_ms;
         let invalid = |error| format!("Непригодные параметры теплового профиля A1: {error}");
         let thermal = if expected_profile == CONFIGURED_A1_PROFILE {
@@ -210,9 +242,12 @@ pub(super) fn load(run: &Path) -> Result<Profile, String> {
             let parameters: Parameters = yaml_serde::from_value(parameters).map_err(invalid)?;
             ThermalReplay::new(&parameters, &catalog, age)?
         };
-        Some(thermal)
+        (Some(thermal), model)
     } else {
-        None
+        (
+            None,
+            analysis.then(|| Err("Прогон не содержит тепловых интервалов A1".into())),
+        )
     };
     let controller = test.controller()?;
     let supervisor = test.supervisor()?;
@@ -221,8 +256,72 @@ pub(super) fn load(run: &Path) -> Result<Profile, String> {
         controller,
         supervisor,
         a1,
+        analysis_model,
         test_only: test,
     })
+}
+
+fn analysis_model(parameters: yaml_serde::Value, catalog: &str) -> Result<Model, String> {
+    if parameters
+        .get("m8")
+        .is_some_and(|value| !value.is_mapping())
+    {
+        return Err("Поле m8 должно описывать холодную границу".into());
+    }
+    let boundary: AnalysisBoundary = yaml_serde::from_value(parameters)
+        .map_err(|error| format!("Непригодные параметры границы M8 ({error})"))?;
+    let [stage1, stage2, tf] = boundary.head_temperature_k;
+    let initial_k = [stage1, stage2, tf, boundary.jacket_k];
+    if !initial_k.into_iter().all(positive)
+        || !boundary.head_capacity_j_per_k.into_iter().all(positive)
+        || !boundary
+            .head_links_w_per_k
+            .into_iter()
+            .all(|value| value.is_finite() && value >= 0.0)
+        || boundary.m8.other_w.is_some_and(|value| !value.is_finite())
+    {
+        return Err("Недопустимые параметры холодной границы M8".into());
+    }
+    let wire = boundary
+        .m8
+        .wire
+        .map(|setup| analysis_wire(setup, catalog, stage1, stage2))
+        .transpose()?;
+    Ok(Model {
+        capacity_stage2_j_per_k: boundary.head_capacity_j_per_k[1],
+        capacity_tf_j_per_k: boundary.head_capacity_j_per_k[2],
+        stage_link_w_per_k: boundary.head_links_w_per_k[0],
+        fixture_link_w_per_k: boundary.head_links_w_per_k[1],
+        initial_k,
+        other_w: boundary.m8.other_w,
+        wire,
+        group: boundary.m8.group,
+    })
+}
+
+fn positive(value: f64) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+fn analysis_wire(
+    setup: BridgeSetup,
+    catalog: &str,
+    stage1: f64,
+    stage2: f64,
+) -> Result<AppliedWire, String> {
+    if !matches!(&setup, BridgeSetup::Conductor { .. }) {
+        return Err("Применённая проводка M8 должна быть проводником".into());
+    }
+    let bridge = setup.build(catalog)?;
+    bridge.flow(Kelvin::new(stage1).unwrap(), Kelvin::new(stage2).unwrap())?;
+    let geometry = serde_json::to_vec(&setup)
+        .map_err(|error| format!("Недопустимая геометрия проводника ({error})"))?;
+    let reference = format!(
+        "{:x}:{:x}",
+        Sha256::digest(geometry),
+        Sha256::digest(catalog.as_bytes())
+    );
+    Ok(AppliedWire { bridge, reference })
 }
 
 pub(super) fn open_file(path: &Path) -> Result<File, String> {
@@ -454,11 +553,11 @@ mod tests {
             .references
             .push(("table".into(), b"table-data".to_vec()));
         dir.write(&snapshot);
-        let profile = load(&dir.0).unwrap();
+        let profile = load(&dir.0, false).unwrap();
         assert_eq!(profile.meta.run, "run-v1");
         assert_eq!(profile.meta.generation, 1);
         std::fs::write(dir.0.join("references/table"), b"changed").unwrap();
-        assert!(load(&dir.0).err().unwrap().contains("SHA-256"));
+        assert!(load(&dir.0, false).err().unwrap().contains("SHA-256"));
     }
 
     #[test]
@@ -468,7 +567,7 @@ mod tests {
         dir.write(&snapshot);
         snapshot.config_yaml.push(' ');
         std::fs::write(dir.0.join("config.snapshot.yaml"), snapshot.config_yaml).unwrap();
-        assert!(load(&dir.0).err().unwrap().contains("SHA-256"));
+        assert!(load(&dir.0, false).err().unwrap().contains("SHA-256"));
     }
 
     #[test]
@@ -482,7 +581,51 @@ mod tests {
             let mut snapshot = RecordingLoop::snapshot();
             snapshot.config_yaml = snapshot.config_yaml.replacen(from, to, 1);
             dir.write(&snapshot);
-            assert!(load(&dir.0).is_err(), "accepted {to}");
+            assert!(load(&dir.0, false).is_err(), "accepted {to}");
         }
+    }
+
+    const BOUNDARY: &str = "head_temperature_k: [45, 15, 16]\n\
+                            head_capacity_j_per_k: [10, 20, 5]\n\
+                            head_links_w_per_k: [0.05, 0.5]\n\
+                            jacket_k: 77\n";
+
+    #[test]
+    fn analysis_profile_distinguishes_legacy_zero_from_unmeasured_heat() {
+        let legacy = analysis_model(yaml_serde::from_str(BOUNDARY).unwrap(), "").unwrap();
+        assert_eq!(legacy.other_w, Some(0.0));
+        assert_eq!(legacy.initial_k, [45.0, 15.0, 16.0, 77.0]);
+        assert_eq!(legacy.capacity_tf_j_per_k, 5.0);
+        assert!(legacy.wire.is_none());
+
+        let unknown = format!("{BOUNDARY}m8: {{ other_w: null, wire: null, group: null }}\n");
+        assert!(analysis_model(yaml_serde::from_str(&unknown).unwrap(), "")
+            .unwrap()
+            .other_w
+            .is_none());
+        let malformed = format!("{BOUNDARY}m8: null\n");
+        assert!(analysis_model(yaml_serde::from_str(&malformed).unwrap(), "").is_err());
+    }
+
+    #[test]
+    fn analysis_wire_identity_depends_on_archived_curve_and_geometry() {
+        let catalog = include_str!("../../../../data/materials/nist.csv");
+        let snapshot = format!(
+            "{BOUNDARY}m8:\n  other_w: 0\n  group: pair\n  wire: {{ kind: conductor, material: ofhc_rrr100, area_m2: 1e-7, length_m: 0.20 }}\n"
+        );
+        let reference = |snapshot: &str, catalog: &str| {
+            analysis_model(yaml_serde::from_str(snapshot).unwrap(), catalog)
+                .unwrap()
+                .wire
+                .unwrap()
+                .reference
+        };
+        let original = reference(&snapshot, catalog);
+        assert_ne!(original, reference(&snapshot, &format!("{catalog}\n")));
+        assert_ne!(
+            original,
+            reference(&snapshot.replace("0.20", "0.21"), catalog)
+        );
+        assert!(analysis_model(yaml_serde::from_str(&snapshot).unwrap(), "").is_err());
     }
 }

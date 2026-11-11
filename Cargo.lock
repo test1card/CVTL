@@ -53,6 +53,8 @@ name = "cvtl-analysis"
 version = "0.1.0"
 dependencies = [
  "cvtl-core",
+ "cvtl-physics",
+ "serde",
 ]
 
 [[package]]

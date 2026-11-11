@@ -138,6 +138,39 @@ export interface ArchiveReceipt {
   output_state: OutputState;
 }
 
+export interface AnalysisEstimate {
+  nominal: number;
+  std_dev: number;
+  p05: number;
+  median: number;
+  p95: number;
+}
+
+export interface AnalysisWindow {
+  start_s: number;
+  end_s: number;
+  intervals: number;
+  mean_temperatures_k: [number, number, number, number];
+  mean_heater_w: number;
+  derivative_at_s: number;
+  derivative_stage2_k_per_s: AnalysisEstimate;
+  derivative_tf_k_per_s: AnalysisEstimate;
+  fixture_compensation_delta_w: number;
+}
+
+export interface CoolingAnalysis {
+  status: "определяется" | "не определяется";
+  reason: string | null;
+  profile: string;
+  seed: number;
+  draws: number;
+  rejected_draws: number;
+  window: AnalysisWindow | null;
+  paired_window: AnalysisWindow | null;
+  q2_eff_w: AnalysisEstimate | null;
+  identified_cf_j_per_k: AnalysisEstimate | null;
+}
+
 export interface ArchiveReview {
   report: {
     run: string;
@@ -159,4 +192,5 @@ export interface ArchiveReview {
   receipt_verified: boolean;
   receipt: ArchiveReceipt;
   diagnostics: Pick<Setup, "wiring" | "fixture">;
+  analysis: CoolingAnalysis;
 }

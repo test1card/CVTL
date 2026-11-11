@@ -12,13 +12,17 @@
 //   A1Scenario - single private thermal state and scenario snapshot
 //   HeldTf - validated Lake Shore observation held between steps
 //   A1PreviewPoint - bounded forecast sample
+//   A1Calibration - test-only applied heat and recorded boundary inputs
+//   A1OtherHeat - measured or concealed applied heat
 // END_MODULE_MAP
 use std::{fmt::Write, time::Duration};
 
 use cvtl_core::units::{JoulesPerKelvin, Kelvin, Kilograms, Seconds, Watts, WattsPerKelvin};
 use cvtl_materials::nist_heat_capacity;
 use cvtl_physics::{
-    request, scenario::BodySetup, Body, Bridge, EmulationMode, PortSample, PowerRequest,
+    request,
+    scenario::{BodySetup, BridgeSetup},
+    Body, Bridge, EmulationMode, PortSample, PowerRequest,
 };
 use cvtl_store::record::{A1ChangeV1, A1StepV1, Inputs, Quality, Snapshot, MAX_RUN_HEADER_BYTES};
 
@@ -40,6 +44,21 @@ const JACKET_K: f64 = 77.0;
 const CAPACITY_J_PER_K: [f64; 3] = [10.0, 20.0, 5.0];
 const HEAD_LINKS_W_PER_K: [f64; 2] = [0.05, 0.5];
 const PREVIEW_STEPS: u32 = 30;
+const DEFAULT_REMOVAL_W: [f64; 2] = [2.0, 4.0];
+
+/// An explicitly selected synthetic calibration scenario.
+pub struct A1Calibration {
+    pub cold_removal: Watts,
+    pub other_heat: A1OtherHeat,
+    pub wire: Option<BridgeSetup>,
+    pub group: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+pub enum A1OtherHeat {
+    Known(Watts),
+    Unmeasured(Watts),
+}
 
 /// A point in the synthetic forecast. Power values describe the interval ending
 /// at this point. At time zero they describe the planned first interval.
@@ -82,6 +101,8 @@ pub(super) struct A1Scenario {
     body: Body,
     bridge: Bridge,
     head: SyntheticHead,
+    net_cold_removal: Watts,
+    applied_wire: Option<Bridge>,
     allow_mass: bool,
     pending: Option<Change>,
     pub(super) held: Option<HeldTf>,
@@ -110,6 +131,24 @@ impl A1Scenario {
         Ok(Self::with_body(body, bridge, true))
     }
 
+    pub(super) fn calibrated(setup: &BodySetup, input: &A1Calibration) -> Result<Self, String> {
+        if input.cold_removal.get() < 0.0 {
+            return Err("Отвод тепла в калибровочном сценарии должен быть неотрицательным".into());
+        }
+        let mut scenario = Self::configured(setup)?;
+        let (A1OtherHeat::Known(other) | A1OtherHeat::Unmeasured(other)) = input.other_heat;
+        scenario.net_cold_removal = Watts::new(input.cold_removal.get() - other.get())
+            .ok_or("Холодный отвод с учётом притока вне численного диапазона")?;
+        if let Some(wire) = &input.wire {
+            if !matches!(wire, BridgeSetup::Conductor { .. }) {
+                return Err("Применённый теплоприток проводки требует модели проводника".into());
+            }
+            scenario.applied_wire = Some(wire.build(CATALOG)?);
+        }
+        scenario.effective_removals()?;
+        Ok(scenario)
+    }
+
     fn with_body(body: Body, bridge: Bridge, allow_mass: bool) -> Self {
         let [stage1, stage2, tf] = HEAD_K.map(|t| Kelvin::new(t).unwrap());
         let [stage1_capacity, stage2_capacity, fixture_capacity] =
@@ -130,6 +169,8 @@ impl A1Scenario {
                 HeadTemperatures { stage1, stage2, tf },
             )
             .unwrap(),
+            net_cold_removal: Watts::new(DEFAULT_REMOVAL_W[1]).unwrap(),
+            applied_wire: None,
             allow_mass,
             pending: None,
             held: None,
@@ -140,6 +181,7 @@ impl A1Scenario {
     pub(super) fn snapshot_parameters(
         snapshot: &mut Snapshot,
         setup: Option<&BodySetup>,
+        calibration: Option<&A1Calibration>,
     ) -> Result<(), String> {
         snapshot
             .config_yaml
@@ -167,6 +209,29 @@ impl A1Scenario {
             "    head_temperature_k: {:?}\n    head_capacity_j_per_k: {:?}\n    head_links_w_per_k: {:?}\n    jacket_k: {}\n",
         ), HEAD_K, CAPACITY_J_PER_K,
             HEAD_LINKS_W_PER_K, JACKET_K).unwrap();
+        if let Some(calibration) = calibration {
+            let other_w = match calibration.other_heat {
+                A1OtherHeat::Known(value) => Some(value.get()),
+                A1OtherHeat::Unmeasured(_) => None,
+            };
+            let mut inputs = yaml_serde::Mapping::new();
+            for (key, value) in [
+                ("other_w", yaml_serde::to_value(other_w)),
+                ("wire", yaml_serde::to_value(&calibration.wire)),
+                ("group", yaml_serde::to_value(&calibration.group)),
+            ] {
+                inputs.insert(
+                    key.into(),
+                    value.map_err(|error| format!("Не удалось записать параметры M8 ({error})"))?,
+                );
+            }
+            let yaml = yaml_serde::to_string(&inputs)
+                .map_err(|error| format!("Не удалось записать параметры M8 ({error})"))?;
+            snapshot.config_yaml.push_str("    m8:\n");
+            for line in yaml.lines() {
+                writeln!(snapshot.config_yaml, "      {line}").unwrap();
+            }
+        }
         if snapshot.config_yaml.len() > MAX_RUN_HEADER_BYTES {
             return Err("Снимок настроек A1 превышает допустимый размер".into());
         }
@@ -238,12 +303,32 @@ impl A1Scenario {
         heater: [Watts; 2],
         port: PortSample,
     ) -> Result<(), String> {
+        let removal = self.effective_removals()?;
         self.head
-            .advance(dt, heater, [2.0, 4.0].map(|p| Watts::new(p).unwrap()))
+            .advance(dt, heater, removal)
             .map_err(|error| error.to_string())?;
         self.body
             .step(dt, port, &self.bridge, Watts::new(0.0).unwrap())?;
         Ok(())
+    }
+
+    fn effective_removals(&self) -> Result<[Watts; 2], String> {
+        let t = self.head.temperatures();
+        let wire_w = self
+            .applied_wire
+            .as_ref()
+            .map(|wire| wire.flow(t.stage1, t.stage2))
+            .transpose()?
+            .map_or(0.0, Watts::get);
+        let [warm, cold] = [
+            DEFAULT_REMOVAL_W[0] + wire_w,
+            self.net_cold_removal.get() - wire_w,
+        ]
+        .map(|value| Watts::new(value).filter(|watts| watts.get() >= 0.0));
+        match (warm, cold) {
+            (Some(warm), Some(cold)) => Ok([warm, cold]),
+            _ => Err("Эффективные отводы тепла должны быть конечными и неотрицательными".into()),
+        }
     }
 
     pub(super) fn queue_change(
@@ -377,6 +462,78 @@ mod tests {
                 conductance_w_per_k: 0.02,
             },
         }
+    }
+
+    #[test]
+    fn calibration_transfers_wire_heat_and_applies_hidden_heat_at_stage2() {
+        let setup = ofhc(30.0);
+        let calibration = A1Calibration {
+            cold_removal: Watts::new(5.0).unwrap(),
+            other_heat: A1OtherHeat::Unmeasured(Watts::new(1.0).unwrap()),
+            wire: Some(BridgeSetup::Conductor {
+                material: "ofhc_rrr100".into(),
+                area_m2: 1e-7,
+                length_m: 0.20,
+            }),
+            group: Some("calibration-pair".into()),
+        };
+        let mut scenario = A1Scenario::calibrated(&setup, &calibration).unwrap();
+        let wire_w = calibration
+            .wire
+            .as_ref()
+            .unwrap()
+            .build(CATALOG)
+            .unwrap()
+            .flow(Kelvin::new(45.0).unwrap(), Kelvin::new(15.0).unwrap())
+            .unwrap()
+            .get();
+        scenario
+            .advance_thermal(
+                Seconds::new(0.1).unwrap(),
+                [Watts::new(0.0).unwrap(); 2],
+                PortSample {
+                    temperature: Kelvin::new(16.0).unwrap(),
+                    age: Seconds::new(0.0).unwrap(),
+                },
+            )
+            .unwrap();
+        let t = scenario.monitored_temperatures().map(Kelvin::get);
+        assert!((t[0] - (44.965 - 0.1 * wire_w / 10.0)).abs() < 1e-12);
+        assert!((t[1] - (15.0 + 0.1 * (-5.0 + 1.0 + wire_w + 1.5 + 0.5) / 20.0)).abs() < 1e-12);
+        assert!((t[2] - 15.99).abs() < 1e-12);
+        let head_energy = 10.0 * (t[0] - 45.0) + 20.0 * (t[1] - 15.0) + 5.0 * (t[2] - 16.0);
+        assert!((head_energy + 0.1 * (2.0 + 5.0 - 1.0)).abs() < 1e-12);
+
+        let mut snapshot = Snapshot {
+            config_yaml: "test_only:\n".into(),
+            scenario: CONFIGURED_SCENARIO.into(),
+            references: Vec::new(),
+        };
+        A1Scenario::snapshot_parameters(&mut snapshot, Some(&setup), Some(&calibration)).unwrap();
+        let parsed: yaml_serde::Value = yaml_serde::from_str(&snapshot.config_yaml).unwrap();
+        let section = parsed["test_only"]["a1"]["m8"].as_mapping().unwrap();
+        assert_eq!(section.len(), 3);
+        assert!(section.get("other_w").unwrap().is_null());
+        assert_eq!(
+            section.get("group").unwrap().as_str(),
+            Some("calibration-pair")
+        );
+        assert_eq!(
+            section.get("wire").unwrap()["kind"].as_str(),
+            Some("conductor")
+        );
+    }
+
+    #[test]
+    fn calibration_rejects_an_unapplied_bridge_description() {
+        let setup = ofhc(30.0);
+        let calibration = A1Calibration {
+            cold_removal: Watts::new(3.0).unwrap(),
+            other_heat: A1OtherHeat::Known(Watts::new(0.0).unwrap()),
+            wire: Some(setup.bridge.clone()),
+            group: None,
+        };
+        assert!(A1Scenario::calibrated(&setup, &calibration).is_err());
     }
 
     #[test]

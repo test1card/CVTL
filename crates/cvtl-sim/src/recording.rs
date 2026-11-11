@@ -58,7 +58,7 @@ use crate::{
     lakeshore::LakeShoreSim,
 };
 
-pub use crate::a1::A1PreviewPoint;
+pub use crate::a1::{A1Calibration, A1OtherHeat, A1PreviewPoint};
 
 pub const PERIOD: Duration = Duration::from_millis(100);
 const COMMAND_LIMIT: Duration = Duration::from_millis(250);
@@ -278,7 +278,7 @@ impl<'a> RecordingLoop<'a> {
         path: PathBuf,
         epoch: Instant,
     ) -> Result<Self, Error> {
-        Self::new_a1_profile(source, thermometer, run, path, epoch, None)
+        Self::new_a1_profile(source, thermometer, run, path, epoch, None, None)
     }
 
     /// Create a test-only session from validated initial body and bridge parameters.
@@ -290,7 +290,28 @@ impl<'a> RecordingLoop<'a> {
         epoch: Instant,
         setup: &BodySetup,
     ) -> Result<Self, Error> {
-        Self::new_a1_profile(source, thermometer, run, path, epoch, Some(setup))
+        Self::new_a1_profile(source, thermometer, run, path, epoch, Some(setup), None)
+    }
+
+    /// Create a test-only session with explicitly applied calibration heat flows.
+    pub fn new_a1_calibration(
+        source: &'a KeithleySimulator,
+        thermometer: &'a LakeShoreSim,
+        run: &str,
+        path: PathBuf,
+        epoch: Instant,
+        setup: &BodySetup,
+        calibration: &A1Calibration,
+    ) -> Result<Self, Error> {
+        Self::new_a1_profile(
+            source,
+            thermometer,
+            run,
+            path,
+            epoch,
+            Some(setup),
+            Some(calibration),
+        )
     }
 
     fn new_a1_profile(
@@ -300,16 +321,27 @@ impl<'a> RecordingLoop<'a> {
         path: PathBuf,
         epoch: Instant,
         setup: Option<&BodySetup>,
+        calibration: Option<&A1Calibration>,
     ) -> Result<Self, Error> {
-        let (a1, scenario) = match setup {
-            Some(setup) => (
+        let (a1, scenario) = match (setup, calibration) {
+            (Some(setup), Some(calibration)) => (
+                A1Scenario::calibrated(setup, calibration).map_err(Error::Scenario)?,
+                CONFIGURED_SCENARIO,
+            ),
+            (Some(setup), None) => (
                 A1Scenario::configured(setup).map_err(Error::Scenario)?,
                 CONFIGURED_SCENARIO,
             ),
-            None => (A1Scenario::new(), SCENARIO),
+            (None, None) => (A1Scenario::new(), SCENARIO),
+            (None, Some(_)) => {
+                return Err(Error::Scenario(
+                    "Для калибровки требуется конфигурация A1".into(),
+                ))
+            }
         };
         let mut snapshot = Self::snapshot_for(scenario, scenario, None);
-        A1Scenario::snapshot_parameters(&mut snapshot, setup).map_err(Error::Scenario)?;
+        A1Scenario::snapshot_parameters(&mut snapshot, setup, calibration)
+            .map_err(Error::Scenario)?;
         thermometer
             .set_temperatures(a1.temperatures())
             .map_err(InstrumentError::Io)?;

@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { promisify } from "node:util";
 import { chromium } from "playwright";
 
 const root = await mkdtemp(resolve(tmpdir(), "cvtl-m7-browser-"));
 const binary = process.env.CVTL_DAEMON ?? resolve("../target/debug/cvtl-daemon");
 const screenshotDir = process.env.CVTL_M7_SCREENSHOTS;
+const execute = promisify(execFile);
 const args = ["serve", "--assets", resolve("dist/operator"), "--runs", resolve(root, "runs"), "--port", "0", "--test-faults"];
 const daemon = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"] });
 let diagnostics = "";
@@ -33,6 +35,13 @@ function startup() {
       resolveUrl(line);
     });
   });
+}
+
+async function cliAnalysis(run) {
+  const { stdout } = await execute("cargo", [
+    "run", "--locked", "--quiet", "-p", "cvtl-cli", "--", "analyze", resolve(root, "runs", run),
+  ], { timeout: 30000 });
+  return JSON.parse(stdout);
 }
 
 let browser;
@@ -142,9 +151,21 @@ try {
   await button("Проверить реплей").click();
   const review = page.getByTestId("replay-result");
   await review.getByText("Совпадает", { exact: true }).waitFor();
+  await review.getByTestId("q2-estimate").waitFor();
+  const primaryAnalysis = await page.evaluate(() => fetch("/api/job")
+    .then((response) => response.json()).then((job) => job.value.analysis));
+  assert.equal(primaryAnalysis.status, "определяется");
+  assert.ok(primaryAnalysis.q2_eff_w.p05 <= 4 && primaryAnalysis.q2_eff_w.p95 >= 4);
+  assert.deepEqual(primaryAnalysis, await cliAnalysis(first));
   await page.getByLabel("Второй прогон", { exact: true }).selectOption(second);
   await button("Сравнить прогоны").click();
-  await page.getByTestId("comparison-result").getByText("Совпадает", { exact: true }).waitFor();
+  const comparison = page.getByTestId("comparison-result");
+  await comparison.getByText("Совпадает", { exact: true }).waitFor();
+  await comparison.locator('[data-testid="analysis-result"][data-status="не определяется"]').waitFor();
+  const shortAnalysis = await page.evaluate(() => fetch("/api/job")
+    .then((response) => response.json()).then((job) => job.value.analysis));
+  assert.equal(shortAnalysis.q2_eff_w, null);
+  assert.deepEqual(shortAnalysis, await cliAnalysis(second));
   await shot("replay");
 
   await screen("Оборудование и настройки");
@@ -197,6 +218,8 @@ try {
     live_window: live.samples.length,
     stop_to_off_ms: Math.round(stopMs),
     completed_nominal_runs: [first, second],
+    analysis_q2_w: primaryAnalysis.q2_eff_w,
+    short_analysis_status: shortAnalysis.status,
     fault_recovery: "unknown → off_verified → reset",
   }, null, 2));
 } finally {
