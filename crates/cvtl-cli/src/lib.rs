@@ -11,6 +11,7 @@
 // START_MODULE_MAP
 //   analyze_archive - cooling estimate for a verified run or pair
 //   inspect_archive - shared verified replay and analysis for the daemon
+//   export_archive - publish verified CSV, Parquet and local HTML
 //   CompletionReceipt - persisted completion proof
 //   run_replay - CLI replay with stable output and exit status
 //   check_archive - replay report with bounded verified samples
@@ -21,10 +22,12 @@
 // END_MODULE_MAP
 
 mod analysis;
+mod export;
 mod replay;
 
 pub use analysis::{analyze_archive, inspect_archive, CompletionReceipt, ReceiptOutputState};
 pub use cvtl_analysis::m8::Report as AnalysisReport;
+pub use export::export_archive;
 pub use replay::{check_archive, run as run_replay, ArchiveReplay, TimelineSample, TIMELINE_LIMIT};
 
 #[doc(hidden)]

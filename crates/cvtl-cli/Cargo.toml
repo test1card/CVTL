@@ -15,6 +15,7 @@ yaml_serde.workspace = true
 cvtl-control = { path = "../cvtl-control" }
 cvtl-safety = { path = "../cvtl-safety" }
 cvtl-store = { path = "../cvtl-store" }
+parquet = { version = "=60.1.0", default-features = false }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
 

@@ -12,6 +12,7 @@
 //   run - read-only replay command
 //   check_archive - read a bounded archive and return its verified timeline
 //   check_thermal - project recorded intervals after successful replay checks
+//   check_export - stream verified ticks and identify the consumed archive bytes
 //   TimelineSample - accepted input and control data for one plotted tick
 // END_MODULE_MAP
 //! Recompute decisions offline and compare them to the verified raw stream.
@@ -19,7 +20,13 @@
 mod a1;
 mod profile;
 
-use std::{collections::VecDeque, io::Read, path::Path, process::ExitCode, time::Duration};
+use std::{
+    collections::VecDeque,
+    io::{self, Read},
+    path::Path,
+    process::ExitCode,
+    time::Duration,
+};
 
 use cvtl_analysis::m8::{Interval, Model, MAX_INTERVALS};
 use cvtl_control::{pi::PowerSample, Demand, HeatPermit, Tick, TimedPowerSample};
@@ -41,6 +48,7 @@ use cvtl_store::{
     session::fault_issue,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::quantity;
 
@@ -220,9 +228,16 @@ pub(crate) struct CheckedThermal {
     pub capture_error: Option<String>,
 }
 
+#[derive(Serialize)]
+pub(crate) struct ExportProvenance {
+    meta: profile::Meta,
+    meta_sha256: String,
+    raw_sha256: String,
+    raw_bytes: u64,
+}
+
 pub fn run(dir: &Path) -> Result<(String, ExitCode), String> {
-    let (archive, _) = compare(dir, Projection::Report)?;
-    let report = archive.report;
+    let report = compare(dir, Projection::Report)?.archive.report;
     let code = if matches!(report.status, Status::Matched) {
         ExitCode::SUCCESS
     } else {
@@ -234,32 +249,53 @@ pub fn run(dir: &Path) -> Result<(String, ExitCode), String> {
 }
 
 pub fn check_archive(dir: &Path) -> Result<ArchiveReplay, String> {
-    compare(dir, Projection::Archive).map(|(archive, _)| archive)
+    compare(dir, Projection::Archive).map(|checked| checked.archive)
 }
 
 pub(crate) fn check_thermal(dir: &Path) -> Result<CheckedThermal, String> {
-    let (archive, capture) = compare(dir, Projection::Thermal)?;
-    let capture = capture.expect("thermal projection has a capture");
-    Ok(CheckedThermal {
-        archive,
-        model: capture.model,
-        intervals: capture.intervals,
-        capture_error: capture.error,
-    })
+    compare(dir, Projection::Thermal).map(Compared::into_thermal)
 }
 
-enum Projection {
+type EmitTick<'a> = &'a mut dyn FnMut(TimelineSample) -> Result<(), String>;
+
+pub(crate) fn check_export(
+    dir: &Path,
+    emit: EmitTick<'_>,
+) -> Result<(CheckedThermal, ExportProvenance), String> {
+    let mut checked = compare(dir, Projection::Export(emit))?;
+    let source = checked.source.take().expect("export hashes its source");
+    Ok((checked.into_thermal(), source))
+}
+
+enum Projection<'a> {
     Report,
     Archive,
     Thermal,
+    Export(EmitTick<'a>),
 }
 
-fn compare(
-    dir: &Path,
-    projection: Projection,
-) -> Result<(ArchiveReplay, Option<ThermalCapture>), String> {
-    let archive = !matches!(projection, Projection::Report);
-    let mut profile = profile::load(dir, matches!(projection, Projection::Thermal))?;
+struct Compared {
+    archive: ArchiveReplay,
+    thermal: Option<ThermalCapture>,
+    source: Option<ExportProvenance>,
+}
+
+impl Compared {
+    fn into_thermal(self) -> CheckedThermal {
+        let capture = self.thermal.expect("thermal projection has a capture");
+        CheckedThermal {
+            archive: self.archive,
+            model: capture.model,
+            intervals: capture.intervals,
+            capture_error: capture.error,
+        }
+    }
+}
+
+fn compare(dir: &Path, projection: Projection<'_>) -> Result<Compared, String> {
+    let archive = matches!(projection, Projection::Archive | Projection::Thermal);
+    let export = matches!(projection, Projection::Export(_));
+    let mut profile = profile::load(dir, export || matches!(projection, Projection::Thermal))?;
     let thermal = profile.analysis_model.take().map(ThermalCapture::new);
     let mut replay = Replay {
         profile,
@@ -271,15 +307,20 @@ fn compare(
         verified_output: OutputState::Unknown,
         last_verified_seq: 0,
         samples: archive.then(VecDeque::new),
+        emit: match projection {
+            Projection::Export(emit) => Some(emit),
+            _ => None,
+        },
+        export_error: None,
         thermal,
     };
     let mut raw = profile::open_file(&dir.join("raw.ndjson.zst"))?;
-    let limit = if archive {
+    let limit = if archive || export {
         let size = raw
             .metadata()
             .map(|meta| meta.len())
             .map_err(|e| format!("Ошибка чтения размера raw: {e}"))?;
-        if size > MAX_ARCHIVE_RAW_BYTES {
+        if archive && size > MAX_ARCHIVE_RAW_BYTES {
             return Err("Размер raw превышает 32 МиБ".into());
         }
         size
@@ -287,19 +328,45 @@ fn compare(
         u64::MAX
     };
     let mut raw_matches_profile = true;
-    let recovered = recover((&mut raw).take(limit), |row| {
+    let mut consume = |row: Record<'_>| {
         // Recovery verifies one run and generation throughout the raw prefix.
         if row.seq == 1 {
             raw_matches_profile = row.run == replay.profile.meta.run
                 && row.generation == replay.profile.meta.generation;
         }
         replay.row(row);
-    })
-    .map_err(|e| format!("Ошибка чтения raw: {e}"))?;
-    if archive && raw.metadata().map(|meta| meta.len()).ok() != Some(limit) {
+    };
+    let raw_error = |e| format!("Ошибка чтения raw: {e}");
+    let (recovered, raw_sha256) = if export {
+        let mut input = RawDigest {
+            reader: (&mut raw).take(limit),
+            hash: Sha256::new(),
+            read_error: None,
+        };
+        let recovered = recover(&mut input, &mut consume).map_err(raw_error)?;
+        if let Some(error) = input.read_error {
+            return Err(format!("Ошибка чтения raw: {error}"));
+        }
+        // Include buffered and unread bytes from any rejected suffix.
+        io::copy(&mut input, &mut io::sink()).map_err(raw_error)?;
+        if input.reader.limit() != 0 {
+            return Err("Размер raw изменился во время реплея".into());
+        }
+        (recovered, Some(format!("{:x}", input.hash.finalize())))
+    } else {
+        let recovered = recover((&mut raw).take(limit), consume).map_err(raw_error)?;
+        (recovered, None)
+    };
+    if (archive || export) && raw.metadata().map(|meta| meta.len()).ok() != Some(limit) {
         return Err("Размер raw изменился во время реплея".into());
     }
     replay.flush();
+    if let Some(error) = replay.export_error {
+        return Err(error);
+    }
+    if export && !raw_matches_profile {
+        return Err("Raw принадлежит другому прогону или поколению".into());
+    }
     let (raw_tail, tail_diagnostic) = match recovered.tail {
         Tail::FrameBoundary => ("frame_boundary", None),
         Tail::IncompleteFrame => (
@@ -328,9 +395,24 @@ fn compare(
         }
     }
     let status = replay.first.as_ref().map_or(Status::Matched, |d| d.status);
+    let meta = replay.profile.meta;
+    let generation = meta.generation;
+    let (run, source) = if let Some(raw_sha256) = raw_sha256 {
+        (
+            meta.run.clone(),
+            Some(ExportProvenance {
+                meta,
+                meta_sha256: replay.profile.meta_sha256,
+                raw_sha256,
+                raw_bytes: limit,
+            }),
+        )
+    } else {
+        (meta.run, None)
+    };
     let report = Report {
-        run: replay.profile.meta.run,
-        generation: replay.profile.meta.generation,
+        run,
+        generation,
         status,
         raw_verified_records: recovered.records,
         raw_verified_frames: recovered.frames,
@@ -350,7 +432,66 @@ fn compare(
         samples,
         report,
     };
-    Ok((archive, replay.thermal))
+    Ok(Compared {
+        archive,
+        thermal: replay.thermal,
+        source,
+    })
+}
+
+struct RawDigest<R> {
+    reader: R,
+    hash: Sha256,
+    read_error: Option<String>,
+}
+
+impl<R: Read> Read for RawDigest<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self.reader.read(buffer) {
+            Ok(count) => {
+                self.hash.update(&buffer[..count]);
+                Ok(count)
+            }
+            Err(error) => {
+                if error.kind() != io::ErrorKind::Interrupted && self.read_error.is_none() {
+                    self.read_error = Some(error.to_string());
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn raw_digest_retains_an_io_error_reported_as_corrupt_frame() {
+    struct FailOnce(bool);
+
+    impl Read for FailOnce {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            if std::mem::replace(&mut self.0, true) {
+                Ok(0)
+            } else {
+                Err(io::Error::other("transient file read failure"))
+            }
+        }
+    }
+
+    let prefix = std::io::Cursor::new([0x28, 0xb5, 0x2f, 0xfd, 0x04]);
+    let mut input = RawDigest {
+        reader: prefix.chain(FailOnce(false)),
+        hash: Sha256::new(),
+        read_error: None,
+    };
+    assert_eq!(
+        recover(&mut input, |_| unreachable!()).unwrap().tail,
+        Tail::CorruptFrame
+    );
+    assert_eq!(io::copy(&mut input, &mut io::sink()).unwrap(), 0);
+    assert_eq!(
+        input.read_error.as_deref(),
+        Some("transient file read failure")
+    );
 }
 
 struct ThermalCapture {
@@ -390,7 +531,7 @@ impl ThermalCapture {
     }
 }
 
-struct Replay {
+struct Replay<'a> {
     profile: profile::Profile,
     operation: Option<Operation>,
     first: Option<Diagnostic>,
@@ -400,11 +541,13 @@ struct Replay {
     verified_output: OutputState,
     last_verified_seq: u64,
     samples: Option<VecDeque<TimelineSample>>,
+    emit: Option<EmitTick<'a>>,
+    export_error: Option<String>,
     thermal: Option<ThermalCapture>,
 }
-impl Replay {
+impl Replay<'_> {
     fn row(&mut self, row: Record<'_>) {
-        if self.first.is_some() {
+        if self.first.is_some() || self.export_error.is_some() {
             return;
         }
         if row.run != self.profile.meta.run || row.generation != self.profile.meta.generation {
@@ -423,7 +566,7 @@ impl Replay {
         {
             self.flush();
         }
-        if self.first.is_some() {
+        if self.first.is_some() || self.export_error.is_some() {
             return;
         }
         let id = row.correlation;
@@ -436,7 +579,7 @@ impl Replay {
             row.seq,
             row.event,
             self.profile.a1.is_some(),
-            self.samples.is_some(),
+            self.samples.is_some() || self.emit.is_some(),
         ) {
             self.first = Some(diagnostic);
         } else {
@@ -448,7 +591,7 @@ impl Replay {
     }
 
     fn flush(&mut self) {
-        if self.first.is_some() {
+        if self.first.is_some() || self.export_error.is_some() {
             return;
         }
         if let Some(op) = self.operation.take() {
@@ -456,8 +599,12 @@ impl Replay {
                 Ok(()) => {
                     self.verified_output = self.profile.supervisor.output_state();
                     self.last_verified_seq = op.last;
-                    if let (Some(samples), Some(sample)) = (&mut self.samples, op.sample) {
-                        append_sample(samples, sample);
+                    if let Some(sample) = op.sample {
+                        if let Some(emit) = &mut self.emit {
+                            self.export_error = emit(sample).err();
+                        } else if let Some(samples) = &mut self.samples {
+                            append_sample(samples, sample);
+                        }
                     }
                 }
                 Err(diagnostic) => self.first = Some(diagnostic),

@@ -20,6 +20,10 @@ use cvtl_store::{
     session::CloseResult,
     writer::spawn_file,
 };
+use parquet::{
+    file::reader::{FileReader, SerializedFileReader},
+    record::RowAccessor,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -77,6 +81,14 @@ impl Fixture {
     fn replay(&self) -> Output {
         Command::new(env!("CARGO_BIN_EXE_cvtl-cli"))
             .arg("replay")
+            .arg(&self.run)
+            .output()
+            .unwrap()
+    }
+
+    fn export(&self) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_cvtl-cli"))
+            .arg("export")
             .arg(&self.run)
             .output()
             .unwrap()
@@ -157,6 +169,79 @@ fn frame(lines: &[Vec<u8>]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
+fn tick_inputs(lines: &[Vec<u8>]) -> Vec<(u64, u64)> {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let row = decode_line(line).unwrap();
+            match (row.correlation, row.event) {
+                (Correlation::Tick(tick), Event::Inputs { .. }) => Some((tick, row.seq)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn assert_m6_export(
+    fixture: &Fixture,
+    ticks: &[(u64, u64)],
+    publication_status: &str,
+    completion_status: &str,
+) -> Value {
+    let primary = fixture.digest();
+    let raw_sha256 = format!(
+        "{:x}",
+        Sha256::digest(fs::read(fixture.run.join("raw.ndjson.zst")).unwrap())
+    );
+    let output = fixture.export();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let publication = json(&output);
+    assert_eq!(publication["report"], "report.html");
+    assert_eq!(publication["status"], publication_status);
+    assert_eq!(publication["rows"], ticks.len());
+    let derived = fixture.run.join(publication["derived"].as_str().unwrap());
+    let summary: Value =
+        serde_json::from_slice(&fs::read(derived.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["status"], publication_status);
+    assert_eq!(summary["rows"], ticks.len());
+    assert_eq!(summary["replay"], json(&fixture.replay()));
+    assert_eq!(summary["source"]["raw_sha256"], raw_sha256);
+    assert_eq!(summary["completion"]["status"], completion_status);
+    assert_eq!(summary["analysis"]["status"], "не определяется");
+    assert_eq!(primary, fixture.digest());
+
+    let csv = fs::read_to_string(derived.join("ticks.csv")).unwrap();
+    let mut rows = csv.lines();
+    assert!(rows.next().unwrap().starts_with("tick,seq,"));
+    let csv_ticks: Vec<(u64, u64)> = rows
+        .map(|row| {
+            let mut columns = row.split(',');
+            (
+                columns.next().unwrap().parse().unwrap(),
+                columns.next().unwrap().parse().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(csv_ticks, ticks);
+
+    let parquet =
+        SerializedFileReader::new(fs::File::open(derived.join("ticks.parquet")).unwrap()).unwrap();
+    let parquet_ticks: Vec<_> = parquet
+        .get_row_iter(None)
+        .unwrap()
+        .map(|row| {
+            let row = row.unwrap();
+            (row.get_ulong(0).unwrap(), row.get_ulong(1).unwrap())
+        })
+        .collect();
+    assert_eq!(parquet_ticks, ticks);
+    summary
+}
+
 #[test]
 fn real_nominal_recording_recomputes_identically_without_writing() {
     let fixture = Fixture::record(false, false);
@@ -170,6 +255,122 @@ fn real_nominal_recording_recomputes_identically_without_writing() {
     assert_eq!(result["output_state_at_boundary"], "off_verified");
     assert_eq!(first.stdout, fixture.replay().stdout);
     assert_eq!(hashes, fixture.digest());
+}
+
+#[test]
+fn export_legacy_run_without_receipt_keeps_completion_partial() {
+    let fixture = Fixture::record(false, false);
+    let ticks = tick_inputs(&fixture.lines());
+    assert_eq!(ticks.len(), 3);
+    let summary = assert_m6_export(&fixture, &ticks, "partial", "missing");
+    assert_eq!(summary["replay"]["status"], "matched");
+    assert_eq!(
+        summary["replay"]["output_state_at_boundary"],
+        "off_verified"
+    );
+    assert_eq!(summary["raw_identity"], "matched");
+    assert_eq!(
+        summary["last_verified_seq"],
+        summary["replay"]["raw_verified_records"]
+    );
+}
+
+#[test]
+fn export_legacy_run_can_complete_without_a_cooling_estimate() {
+    let fixture = Fixture::record(false, false);
+    let replay = json(&fixture.replay());
+    let receipt = serde_json::json!({"receipt": {
+        "run": replay["run"],
+        "generation": replay["generation"],
+        "last_seq": replay["raw_verified_records"],
+        "output_state": replay["output_state_at_boundary"],
+    }});
+    let receipt_path = fixture.run.join("completed.json");
+    let receipt_bytes = serde_json::to_vec(&receipt).unwrap();
+    fs::write(&receipt_path, &receipt_bytes).unwrap();
+    let ticks = tick_inputs(&fixture.lines());
+    let summary = assert_m6_export(&fixture, &ticks, "complete", "verified");
+    assert_eq!(
+        summary["analysis"]["reason"],
+        "Прогон не содержит тепловых интервалов A1"
+    );
+    assert_eq!(fs::read(receipt_path).unwrap(), receipt_bytes);
+}
+
+#[test]
+fn export_tables_stop_at_the_last_semantically_verified_tick() {
+    let fixture = Fixture::record(false, false);
+    let mut lines = fixture.lines();
+    let ticks = tick_inputs(&lines);
+    assert_eq!(ticks.len(), 3);
+    let start_of = |tick| {
+        lines
+            .iter()
+            .position(|line| decode_line(line).unwrap().correlation == Correlation::Tick(tick))
+            .unwrap()
+    };
+    let prefix_end = start_of(ticks[1].0);
+    let damaged_end = start_of(ticks[2].0);
+    let last_verified_seq = decode_line(&lines[prefix_end - 1]).unwrap().seq;
+    let prefix = frame(&lines[..prefix_end]);
+    let second = frame(&lines[prefix_end..damaged_end]);
+    let trailing = frame(&lines[damaged_end..]);
+
+    let mut corrupted = second.clone();
+    *corrupted.last_mut().unwrap() ^= 1;
+    let mut corrupted_raw = [prefix.as_slice(), &corrupted, &trailing].concat();
+    // Keep some bytes beyond recover's buffered read to exercise full-file hashing.
+    corrupted_raw.resize(corrupted_raw.len() + 64 * 1024, 0xa5);
+    for (tail, raw) in [
+        (
+            "incomplete_frame",
+            [prefix.as_slice(), &second[..second.len() - 2]].concat(),
+        ),
+        ("corrupt_frame", corrupted_raw),
+    ] {
+        fixture.write_raw(&raw);
+        let summary = assert_m6_export(&fixture, &ticks[..1], "partial", "missing");
+        assert_eq!(summary["replay"]["raw_tail"], tail);
+        assert_eq!(summary["replay"]["status"], tail);
+        assert_eq!(summary["replay"]["raw_verified_records"], last_verified_seq);
+        assert_eq!(summary["last_verified_seq"], last_verified_seq);
+        assert_eq!(summary["raw_identity"], "matched");
+    }
+
+    let changed_seq = lines[prefix_end..damaged_end]
+        .iter_mut()
+        .find_map(|line| {
+            let mut row = decode_line(line).unwrap();
+            let Event::Control {
+                limited_w: Some(value),
+                ..
+            } = &mut row.event
+            else {
+                return None;
+            };
+            *value += 0.125;
+            let seq = row.seq;
+            *line = encode_line(&row).unwrap();
+            Some(seq)
+        })
+        .unwrap();
+    fixture.write_raw(&frame(&lines));
+    let summary = assert_m6_export(&fixture, &ticks[..1], "partial", "missing");
+    assert_eq!(summary["replay"]["status"], "mismatch");
+    assert_eq!(summary["replay"]["raw_tail"], "frame_boundary");
+    assert_eq!(summary["replay"]["raw_verified_records"], lines.len());
+    assert_eq!(summary["replay"]["first_diagnostic"]["seq"], changed_seq);
+    assert_eq!(summary["last_verified_seq"], last_verified_seq);
+}
+
+#[test]
+fn export_empty_raw_does_not_confirm_identity() {
+    let fixture = Fixture::record(false, false);
+    fixture.write_raw(&[]);
+    let summary = assert_m6_export(&fixture, &[], "partial", "missing");
+    assert_eq!(summary["raw_identity"], "unverified");
+    assert_eq!(summary["replay"]["raw_verified_records"], 0);
+    assert_eq!(summary["last_verified_seq"], 0);
 }
 
 #[test]
@@ -310,7 +511,7 @@ fn missing_off_readback_does_not_accept_output_summary() {
 }
 
 #[test]
-fn mismatched_run_or_generation_cannot_replay_raw() {
+fn mismatched_run_or_generation_cannot_replay_or_export_raw() {
     for (key, value) in [
         ("run", Value::from("another")),
         ("generation", Value::from(2)),
@@ -323,6 +524,13 @@ fn mismatched_run_or_generation_cannot_replay_raw() {
         let out = fixture.replay();
         assert!(!out.status.success());
         assert_eq!(json(&out)["status"], "mismatch");
+
+        let primary = fixture.digest();
+        let out = fixture.export();
+        assert_eq!(out.status.code(), Some(1));
+        assert!(!out.stderr.is_empty());
+        assert!(!fixture.run.join("report.html").exists());
+        assert_eq!(fixture.digest(), primary);
     }
 }
 

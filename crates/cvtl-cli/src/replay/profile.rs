@@ -35,7 +35,7 @@ use cvtl_safety::{
     supervisor::Supervisor,
 };
 use cvtl_store::record::MAX_RUN_HEADER_BYTES;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::a1::{ConfiguredParameters, Parameters, ThermalReplay};
@@ -46,7 +46,7 @@ const PROFILE: &str = "m6_recording_v1";
 const A1_PROFILE: &str = "test_only_a1_loop_v1";
 const CONFIGURED_A1_PROFILE: &str = "test_only_a1_loop_v2";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub(super) struct Meta {
     pub run: String,
     pub generation: u64,
@@ -57,7 +57,7 @@ pub(super) struct Meta {
     references_status: String,
     references: Vec<Reference>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Reference {
     name: String,
     sha256: String,
@@ -166,6 +166,7 @@ impl AnalysisTerms {
 
 pub(super) struct Profile {
     pub meta: Meta,
+    pub meta_sha256: String,
     pub controller: Controller,
     pub supervisor: Supervisor,
     pub a1: Option<ThermalReplay>,
@@ -253,6 +254,7 @@ pub(super) fn load(run: &Path, analysis: bool) -> Result<Profile, String> {
     let supervisor = test.supervisor()?;
     Ok(Profile {
         meta,
+        meta_sha256: format!("{:x}", Sha256::digest(&bytes)),
         controller,
         supervisor,
         a1,

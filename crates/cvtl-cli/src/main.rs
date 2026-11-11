@@ -18,7 +18,7 @@ use cvtl_analysis::{
     m8::Options,
     stage_i::{StageI, MAX_LEGACY_BYTES},
 };
-use cvtl_cli::{analyze_archive, quantity, run_replay};
+use cvtl_cli::{analyze_archive, export_archive, quantity, run_replay};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -37,6 +37,8 @@ const HELP: &str = "CVTL — автономные расчёты и реплей
     cvtl-cli replay <каталог>           сверка записанного прогона без приборов\n\
     cvtl-cli analyze <каталог>          Q2_eff, производные и неопределённость A1\n\
       [--start СЕК] [--window СЕК] [--seed ЧИСЛО] [--pair КАТАЛОГ]\n\
+    cvtl-cli export <каталог>           проверенные такты, CSV, Parquet и HTML\n\
+      [--start СЕК] [--window СЕК] [--seed ЧИСЛО]\n\
     cvtl-cli import-stage-i <файл.csv>  импорт стационарных данных этапа I\n\
     Примеры входа находятся в data/scenarios/.";
 
@@ -98,7 +100,10 @@ fn import_stage_i(path: &Path) -> Result<String, String> {
     .map_err(|error| format!("Ошибка формирования результата импорта: {error}"))
 }
 
-fn analysis(path: &Path, mut args: impl Iterator<Item = OsString>) -> Result<String, String> {
+fn analysis_options(
+    mut args: impl Iterator<Item = OsString>,
+    allow_pair: bool,
+) -> Result<(Options, Option<PathBuf>), String> {
     let mut options = Options::default();
     let mut window = None;
     let mut seed = None;
@@ -132,7 +137,7 @@ fn analysis(path: &Path, mut args: impl Iterator<Item = OsString>) -> Result<Str
                         .ok_or("Seed должен быть целым беззнаковым числом")?,
                 );
             }
-            Some("--pair") if pair.is_none() => pair = Some(PathBuf::from(value)),
+            Some("--pair") if allow_pair && pair.is_none() => pair = Some(PathBuf::from(value)),
             _ => {
                 return Err(format!(
                     "Неизвестный или повторный параметр {}",
@@ -143,8 +148,7 @@ fn analysis(path: &Path, mut args: impl Iterator<Item = OsString>) -> Result<Str
     }
     options.window_s = window.unwrap_or(options.window_s);
     options.seed = seed.unwrap_or(options.seed);
-    let report = analyze_archive(path, options, pair.as_deref())?;
-    serde_json::to_string(&report).map_err(|error| format!("Ошибка формирования анализа ({error})"))
+    Ok((options, pair))
 }
 
 fn run() -> Result<(String, ExitCode), String> {
@@ -159,7 +163,15 @@ fn run() -> Result<(String, ExitCode), String> {
         .next()
         .ok_or("Укажите входной файл или каталог прогона")?;
     if command == "analyze" {
-        return analysis(Path::new(&path), args).map(|out| (out, ExitCode::SUCCESS));
+        let (options, pair) = analysis_options(args, true)?;
+        let report = analyze_archive(Path::new(&path), options, pair.as_deref())?;
+        return serde_json::to_string(&report)
+            .map(|out| (out, ExitCode::SUCCESS))
+            .map_err(|error| format!("Ошибка формирования анализа ({error})"));
+    }
+    if command == "export" {
+        let (options, _) = analysis_options(args, false)?;
+        return export_archive(Path::new(&path), options).map(|out| (out, ExitCode::SUCCESS));
     }
     if args.next().is_some() {
         return Err("Ожидается один входной путь".into());
