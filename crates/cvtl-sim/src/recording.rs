@@ -38,7 +38,7 @@ use cvtl_core::units::{
 use cvtl_envelope::{ChannelSpec, Margins, ResistanceRange};
 use cvtl_instruments::{
     keithley::{Channel, ChannelConfig, Keithley, SourceChannel},
-    lakeshore::{self, LakeShore218, SensorUnit, TemperatureReading, Thermometer},
+    lakeshore::{self, LakeShore218, SensorUnit, TemperatureReading},
     InstrumentError, LoopbackTcp, MessageTransport, MAX_FRAME_BYTES,
 };
 use cvtl_physics::scenario::BodySetup;
@@ -209,6 +209,7 @@ fn wire_error(error: &InstrumentError) -> &'static str {
         InstrumentError::Unverified => "unverified",
         InstrumentError::InvalidInput(_) => "invalid_input",
         InstrumentError::State(_) => "state",
+        InstrumentError::Bridge(_) => "bridge",
     }
 }
 
@@ -1140,24 +1141,27 @@ impl<'a> RecordingLoop<'a> {
                 let results = CHANNELS.map(|channel| driver.measure(channel, deadline()));
                 let quality = results
                     .each_ref()
-                    .map(|result| quality(result.as_ref().map(|_| ())));
+                    .map(|result| classify_quality(result.as_ref().map(|_| ())));
                 (results.map(Result::ok), quality)
             }
             None => ([None; 2], [Quality::Missing; 2]),
         };
         let (temperatures, temperature_quality) = match &mut self.lake {
             Some(driver) => {
-                let results = [1, 2, 3, 4].map(|channel| {
-                    driver.read(
-                        lakeshore::Channel::new(channel).unwrap(),
-                        SensorUnit::Volts,
-                        deadline(),
-                    )
-                });
-                let quality = results
-                    .each_ref()
-                    .map(|result| quality(result.as_ref().map(|_| ())));
-                (results.map(Result::ok), quality)
+                let channels = [1, 2, 3, 4]
+                    .map(|channel| lakeshore::Channel::new(channel).expect("fixed channel"));
+                match driver.read_channels(&channels, SensorUnit::Volts, deadline()) {
+                    Ok(readings) => {
+                        let mut temperatures = [None; 4];
+                        let mut quality = [Quality::Missing; 4];
+                        for (index, result) in readings.into_iter().enumerate() {
+                            quality[index] = classify_quality(result.as_ref().map(|_| ()));
+                            temperatures[index] = result.ok();
+                        }
+                        (temperatures, quality)
+                    }
+                    Err(_) => ([None; 4], [Quality::Missing; 4]),
+                }
             }
             None => ([None; 4], [Quality::Missing; 4]),
         };
@@ -1235,8 +1239,10 @@ impl<'a> RecordingLoop<'a> {
             mode_step_v1: None,
         };
         if !matches!(self.scenario, Scenario::LegacyPower) && temperatures[2].is_some() {
-            // The 218 reading starts with RDGST. A1 holds the later KRDG sample.
-            input.temperatures[2].read_started_ns = self
+            // The 218 reading starts with RDGST. A1 may hold the later KRDG sample,
+            // but a batch event from another channel must not land after this
+            // channel's own read window.
+            let sent = self
                 .trace
                 .borrow()
                 .events
@@ -1248,9 +1254,18 @@ impl<'a> RecordingLoop<'a> {
                         command,
                         status: "sent",
                         at_ns,
-                    } if command == "KRDG? 3" => Some(*at_ns),
+                    } if command == "KRDG? 3" || command == "KRDG?" => Some(*at_ns),
                     _ => None,
                 });
+            if let (Some(sent), Some(start), Some(finish)) = (
+                sent,
+                input.temperatures[2].read_started_ns,
+                input.temperatures[2].read_finished_ns,
+            ) {
+                if sent >= start && sent <= finish {
+                    input.temperatures[2].read_started_ns = Some(sent);
+                }
+            }
         }
         if matches!(&self.scenario, Scenario::Operator(mode) if mode.compensation.is_some()
             || matches!(mode.setup.mode, ModeSetup::VirtualBody { port: BodyPort::Tf, .. }))
@@ -1633,7 +1648,7 @@ impl Drop for RecordingLoop<'_> {
     }
 }
 
-fn quality(result: Result<(), &InstrumentError>) -> Quality {
+fn classify_quality(result: Result<(), &InstrumentError>) -> Quality {
     match result {
         Ok(()) => Quality::Measured,
         Err(InstrumentError::InvalidResponse(_)) => Quality::Invalid,

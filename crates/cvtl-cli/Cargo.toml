@@ -8,6 +8,7 @@ rust-version.workspace = true
 cvtl-analysis = { path = "../cvtl-analysis" }
 cvtl-core = { path = "../cvtl-core" }
 cvtl-envelope = { path = "../cvtl-envelope" }
+cvtl-instruments = { path = "../cvtl-instruments" }
 cvtl-materials = { path = "../cvtl-materials" }
 cvtl-physics = { path = "../cvtl-physics" }
 serde.workspace = true

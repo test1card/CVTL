@@ -74,6 +74,42 @@ pub fn parse_status(bytes: &[u8]) -> Result<u8> {
     s.parse()
         .map_err(|_| InstrumentError::InvalidResponse("invalid status"))
 }
+pub fn parse_reading_list(bytes: &[u8]) -> Result<[f64; 8]> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| InstrumentError::InvalidResponse("non-ASCII reading list"))?;
+    let mut values = [0.0f64; 8];
+    let mut count = 0;
+    for field in text.split(',') {
+        if count == values.len() {
+            return Err(InstrumentError::InvalidResponse("too many readings"));
+        }
+        values[count] = parse_reading(field.as_bytes())?;
+        count += 1;
+    }
+    if count != values.len() {
+        return Err(InstrumentError::InvalidResponse("expected eight readings"));
+    }
+    Ok(values)
+}
+
+pub fn parse_status_list(bytes: &[u8]) -> Result<[u8; 8]> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| InstrumentError::InvalidResponse("non-ASCII status list"))?;
+    let mut values = [0u8; 8];
+    let mut count = 0;
+    for field in text.split(',') {
+        if count == values.len() {
+            return Err(InstrumentError::InvalidResponse("too many statuses"));
+        }
+        values[count] = parse_status(field.as_bytes())?;
+        count += 1;
+    }
+    if count != values.len() {
+        return Err(InstrumentError::InvalidResponse("expected eight statuses"));
+    }
+    Ok(values)
+}
+
 pub trait Thermometer {
     fn read(
         &mut self,
@@ -96,14 +132,77 @@ impl<T: MessageTransport> LakeShore218<T> {
     pub fn recover(&mut self, transport: T) {
         self.transport = transport;
     }
-    fn status(&mut self, channel: Channel, deadline: Instant) -> Result<()> {
-        let response = self
-            .transport
-            .query(&format!("RDGST? {}", channel.0), deadline)?;
-        if parse_status(&response)? != 0 {
-            return Err(InstrumentError::InvalidResponse("input status not clear"));
+    fn batch_status(&mut self, deadline: Instant) -> Result<[u8; 8]> {
+        let response = self.transport.query("RDGST?", deadline)?;
+        parse_status_list(&response)
+    }
+    fn batch_values(&mut self, command: &str, deadline: Instant) -> Result<[f64; 8]> {
+        let response = self.transport.query(command, deadline)?;
+        parse_reading_list(&response)
+    }
+    /// Read all requested channels from one batch status/reading/status exchange.
+    ///
+    /// The real 218S returns the same first-channel value for `KRDG? <n>` but
+    /// returns all eight values for a bare `KRDG?`. Batch is therefore the only
+    /// correct way to address an individual input on this firmware.
+    pub fn read_channels(
+        &mut self,
+        channels: &[Channel],
+        unit: SensorUnit,
+        deadline: Instant,
+    ) -> Result<Vec<Result<TemperatureReading>>> {
+        if !self.transport.is_usable() {
+            return Err(InstrumentError::Disconnected);
         }
-        Ok(())
+        if channels.is_empty() {
+            return Ok(Vec::new());
+        }
+        let started = Instant::now();
+        let result = (|| {
+            let before = self.batch_status(deadline)?;
+            let kelvin = self.batch_values("KRDG?", deadline)?;
+            let sensor = self.batch_values("SRDG?", deadline)?;
+            let after = self.batch_status(deadline)?;
+            Ok((before, kelvin, sensor, after))
+        })();
+        let (before, kelvin, sensor, after) = match result {
+            Ok(value) => value,
+            Err(error) => {
+                self.transport.invalidate();
+                return Err(error);
+            }
+        };
+        let finished = Instant::now();
+        Ok(channels
+            .iter()
+            .map(|channel| {
+                let index = usize::from(channel.0 - 1);
+                if before[index] != 0 || after[index] != 0 {
+                    return Err(InstrumentError::InvalidResponse("input status not clear"));
+                }
+                if kelvin[index] <= 0.0 {
+                    return Err(InstrumentError::InvalidResponse("nonpositive kelvin"));
+                }
+                Ok(TemperatureReading {
+                    channel: *channel,
+                    kelvin: Kelvin::new(kelvin[index])
+                        .ok_or(InstrumentError::InvalidResponse("invalid kelvin"))?,
+                    sensor: match unit {
+                        SensorUnit::Volts => SensorReading::Volts(
+                            Volts::new(sensor[index])
+                                .ok_or(InstrumentError::InvalidResponse("invalid voltage"))?,
+                        ),
+                        SensorUnit::Ohms => SensorReading::Ohms(
+                            Ohms::new(sensor[index])
+                                .ok_or(InstrumentError::InvalidResponse("invalid resistance"))?,
+                        ),
+                    },
+                    started,
+                    finished,
+                    measurement_time: None,
+                })
+            })
+            .collect())
     }
 }
 impl<T: MessageTransport> Thermometer for LakeShore218<T> {
@@ -113,48 +212,101 @@ impl<T: MessageTransport> Thermometer for LakeShore218<T> {
         unit: SensorUnit,
         deadline: Instant,
     ) -> Result<TemperatureReading> {
-        if !self.transport.is_usable() {
-            return Err(InstrumentError::Disconnected);
-        }
-        let started = Instant::now();
-        let result = (|| {
-            self.status(channel, deadline)?;
-            let kelvin = parse_reading(
-                &self
-                    .transport
-                    .query(&format!("KRDG? {}", channel.0), deadline)?,
-            )?;
-            let value = parse_reading(
-                &self
-                    .transport
-                    .query(&format!("SRDG? {}", channel.0), deadline)?,
-            )?;
-            self.status(channel, deadline)?;
-            if kelvin <= 0.0 {
-                return Err(InstrumentError::InvalidResponse("nonpositive kelvin"));
+        let mut readings = self.read_channels(&[channel], unit, deadline)?;
+        match readings.pop() {
+            Some(Ok(reading)) => Ok(reading),
+            Some(Err(error)) => {
+                // The one-channel API keeps the original contract: a rejected
+                // input makes the whole session unusable. `read_channels`
+                // reports per-channel failures for a multi-channel frame.
+                self.transport.invalidate();
+                Err(error)
             }
-            Ok(TemperatureReading {
-                channel,
-                kelvin: Kelvin::new(kelvin)
-                    .ok_or(InstrumentError::InvalidResponse("invalid kelvin"))?,
-                sensor: match unit {
-                    SensorUnit::Volts => SensorReading::Volts(
-                        Volts::new(value)
-                            .ok_or(InstrumentError::InvalidResponse("invalid voltage"))?,
-                    ),
-                    SensorUnit::Ohms => SensorReading::Ohms(
-                        Ohms::new(value)
-                            .ok_or(InstrumentError::InvalidResponse("invalid resistance"))?,
-                    ),
-                },
-                started,
-                finished: Instant::now(),
-                measurement_time: None,
-            })
-        })();
-        if result.is_err() {
-            self.transport.invalidate();
+            None => Err(InstrumentError::Disconnected),
         }
-        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    struct Fake {
+        responses: VecDeque<Vec<u8>>,
+        invalidated: bool,
+    }
+
+    impl Fake {
+        fn new(responses: &[&[u8]]) -> Self {
+            Self {
+                responses: responses.iter().map(|value| value.to_vec()).collect(),
+                invalidated: false,
+            }
+        }
+    }
+
+    impl MessageTransport for Fake {
+        fn send(&mut self, _command: &str, _deadline: Instant) -> Result<()> {
+            Ok(())
+        }
+        fn query(&mut self, _command: &str, _deadline: Instant) -> Result<Vec<u8>> {
+            Ok(self.responses.pop_front().expect("scripted response"))
+        }
+        fn invalidate(&mut self) {
+            self.invalidated = true;
+        }
+        fn is_usable(&self) -> bool {
+            !self.invalidated
+        }
+    }
+
+    const STATUS: &[u8] = b"000,000,000,032,000,000,000,000\r";
+    const KELVIN: &[u8] = b"+298.03,+297.97,+301.92,+380.00,+323.23,+298.01,+298.61,+00.000\r";
+    const SENSOR: &[u8] = b"+0.5629,+0.5649,+0.5552,+0.0232,+0.5059,+0.5642,+0.5611,+0.0550\r";
+
+    fn deadline() -> Instant {
+        Instant::now() + std::time::Duration::from_secs(1)
+    }
+
+    #[test]
+    fn batch_lists_parse_eight_values() {
+        let kelvin = parse_reading_list(KELVIN).unwrap();
+        assert_eq!(kelvin[1], 297.97);
+        let statuses = parse_status_list(STATUS).unwrap();
+        assert_eq!(statuses[3], 32);
+        assert!(parse_reading_list(b"+1,+2").is_err());
+        assert!(parse_status_list(b"0,0,0").is_err());
+    }
+
+    #[test]
+    fn one_batch_selects_channels_and_rejects_a_bad_status() {
+        let mut driver = LakeShore218::new(Fake::new(&[STATUS, KELVIN, SENSOR, STATUS]));
+        let readings = driver
+            .read_channels(
+                &[Channel::new(2).unwrap(), Channel::new(4).unwrap()],
+                SensorUnit::Volts,
+                deadline(),
+            )
+            .unwrap();
+        let second = readings[0].as_ref().unwrap();
+        assert_eq!(second.channel.number(), 2);
+        assert_eq!(second.kelvin.get(), 297.97);
+        match second.sensor {
+            SensorReading::Volts(value) => assert_eq!(value.get(), 0.5649),
+            SensorReading::Ohms(_) => panic!("expected volts"),
+        }
+        assert!(readings[1].is_err());
+        assert!(!driver.transport.invalidated);
+    }
+
+    #[test]
+    fn malformed_batch_invalidates_the_session() {
+        let mut driver = LakeShore218::new(Fake::new(&[STATUS, b"bad\r"]));
+        let error = driver
+            .read_channels(&[Channel::new(1).unwrap()], SensorUnit::Volts, deadline())
+            .unwrap_err();
+        assert!(matches!(error, InstrumentError::InvalidResponse(_)));
+        assert!(driver.transport.invalidated);
     }
 }

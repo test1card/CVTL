@@ -9,3 +9,5 @@
 /CVTL_TZ_overview.docx
 /CVTL-M2-architecture-review*.zip
 /DOCX_TASK.md
+__pycache__/
+*.pyc

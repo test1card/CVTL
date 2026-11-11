@@ -12,6 +12,7 @@
 //   main - CLI entry point
 // END_MODULE_MAP
 mod advisor;
+mod hardware;
 mod wire;
 
 use cvtl_analysis::{
@@ -40,6 +41,9 @@ const HELP: &str = "CVTL — автономные расчёты и реплей
     cvtl-cli export <каталог>           проверенные такты, CSV, Parquet и HTML\n\
       [--start СЕК] [--window СЕК] [--seed ЧИСЛО]\n\
     cvtl-cli import-stage-i <файл.csv>  импорт стационарных данных этапа I\n\
+    cvtl-cli hardware-check --keithley HOST:PORT [--lake HOST:PORT]\n\
+      [--channels 1,2,3,4] [--unit volts|ohms] [--timeout-ms N]\n\
+        проверка без нагрева через локальный VISA-мост (Фаза B)\n\
     Примеры входа находятся в data/scenarios/.";
 
 fn read_yaml<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
@@ -158,6 +162,9 @@ fn run() -> Result<(String, ExitCode), String> {
     };
     if command == "--help" || command == "-h" {
         return Ok((HELP.into(), ExitCode::SUCCESS));
+    }
+    if command == "hardware-check" {
+        return hardware::run(args).map(|out| (out, ExitCode::SUCCESS));
     }
     let path = args
         .next()

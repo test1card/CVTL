@@ -115,9 +115,12 @@ pub fn parse_identity(bytes: &[u8]) -> Result<String> {
     let s = std::str::from_utf8(bytes)
         .map_err(|_| InstrumentError::InvalidResponse("identity encoding"))?;
     let parts: Vec<_> = s.split(',').map(str::trim).collect();
+    // The instrument reports "Keithley Instruments Inc., Model 2604B" with
+    // mixed case; the simulator uses upper case. Match the documented family
+    // without making the identity check case-sensitive.
     if parts.len() != 4
-        || parts[0] != "KEITHLEY INSTRUMENTS INC."
-        || !matches!(parts[1], "2604B" | "MODEL 2604B")
+        || !parts[0].eq_ignore_ascii_case("KEITHLEY INSTRUMENTS INC.")
+        || !(parts[1].eq_ignore_ascii_case("2604B") || parts[1].eq_ignore_ascii_case("MODEL 2604B"))
         || parts
             .iter()
             .any(|x| x.is_empty() || x.contains(['\n', '\r', '\t']))

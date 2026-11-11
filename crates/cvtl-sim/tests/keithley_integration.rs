@@ -177,6 +177,8 @@ fn lost_session_makes_both_channels_unknown_and_requires_new_recovery() {
 fn identity_error_and_iv_wire_formats_are_strict() {
     use cvtl_instruments::keithley::{parse_error, parse_identity, parse_iv};
     assert!(parse_identity(b"KEITHLEY INSTRUMENTS INC.,MODEL 2604B,1234,3.4.0").is_ok());
+    // Real 2604B firmware 3.2.1 replies with mixed case.
+    assert!(parse_identity(b"Keithley Instruments Inc., Model 2604B, 4083236, 3.2.1").is_ok());
     assert!(parse_identity(b"KEITHLEY,MODEL 2602B,1234,3.4.0").is_err());
     assert!(parse_identity(b"KEITHLEY,MODEL 2604B,1234,3.4.0\nextra").is_err());
     assert!(parse_error(b"0.00000e+00\tQueue Is Empty\t0.00000e+00\t1.00000e+00").is_ok());

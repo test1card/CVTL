@@ -1,11 +1,17 @@
-//! Instrument protocol adapters. Phase A ships only a loopback transport.
+//! Instrument protocol adapters.
+//!
+//! Phase A ships the loopback TCP transport used by the simulators. Phase B
+//! adds a loopback protocol to a local PyVISA bridge; the driver code and the
+//! command/response parsers stay identical.
 
 pub mod keithley;
 pub mod lakeshore;
 pub mod maisheng;
 mod transport;
+mod visa_bridge;
 
 pub use transport::{LoopbackTcp, MessageTransport, MAX_FRAME_BYTES};
+pub use visa_bridge::VisaBridgeTcp;
 
 use std::{error::Error, fmt, io};
 
@@ -20,6 +26,7 @@ pub enum InstrumentError {
     Unverified,
     InvalidInput(&'static str),
     State(&'static str),
+    Bridge(String),
 }
 
 impl fmt::Display for InstrumentError {
@@ -32,6 +39,7 @@ impl fmt::Display for InstrumentError {
             Self::Unverified => f.write_str("Подключение или протокол не подтверждены"),
             Self::InvalidInput(reason) => write!(f, "Недопустимый параметр: {reason}"),
             Self::State(reason) => write!(f, "Операция недоступна в текущем состоянии: {reason}"),
+            Self::Bridge(text) => write!(f, "Ошибка моста VISA: {text}"),
         }
     }
 }

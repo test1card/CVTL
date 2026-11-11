@@ -148,10 +148,10 @@ fn final_status_fault_rejects_numeric_readings_and_latches_transport() {
             let mut calls = self.calls.lock().unwrap();
             calls.push(command.to_owned());
             Ok(match calls.len() {
-                1 => b"0".to_vec(),
-                2 => b"+42.000".to_vec(),
-                3 => b"+1.234".to_vec(),
-                4 => b"32".to_vec(),
+                1 => b"000,000,000,000,000,000,000,000".to_vec(),
+                2 => b"+42.000,+42.000,+42.000,+42.000,+42.000,+42.000,+42.000,+42.000".to_vec(),
+                3 => b"+1.234,+1.234,+1.234,+1.234,+1.234,+1.234,+1.234,+1.234".to_vec(),
+                4 => b"000,000,032,000,000,000,000,000".to_vec(),
                 _ => panic!("unexpected query"),
             })
         }
@@ -177,6 +177,6 @@ fn final_status_fault_rejects_numeric_readings_and_latches_transport() {
     ));
     assert_eq!(
         *calls.lock().unwrap(),
-        ["RDGST? 3", "KRDG? 3", "SRDG? 3", "RDGST? 3"]
+        ["RDGST?", "KRDG?", "SRDG?", "RDGST?"]
     );
 }

@@ -60,11 +60,14 @@ impl LakeShoreSim {
                 Fault::Silence => return Reply::Silence,
                 _ => {}
             }
-            let Some((op, channel)) = command.split_once(' ') else {
-                return Reply::NoResponse;
-            };
-            let Ok(channel @ 1..=8) = channel.parse::<u8>() else {
-                return Reply::NoResponse;
+            let (op, channel) = match command.split_once(' ') {
+                Some((op, channel)) => {
+                    let Ok(channel @ 1..=8) = channel.parse::<u8>() else {
+                        return Reply::NoResponse;
+                    };
+                    (op, Some(channel))
+                }
+                None => (command, None),
             };
             let mut delay = None;
             let response = match op {
@@ -73,26 +76,55 @@ impl LakeShoreSim {
                         Fault::Status(v) => v,
                         _ => 0,
                     };
-                    if status == 0 {
-                        delay = state
-                            .next_status_delay
-                            .take_if(|(target, _)| *target == channel)
-                            .map(|(_, delay)| delay);
+                    match channel {
+                        Some(channel) => {
+                            if status == 0 {
+                                delay = state
+                                    .next_status_delay
+                                    .take_if(|(target, _)| *target == channel)
+                                    .map(|(_, delay)| delay);
+                            }
+                            format!("{status}\n")
+                        }
+                        None => {
+                            delay = state.next_status_delay.take().map(|(_, delay)| delay);
+                            format!(
+                                "{}\n",
+                                std::iter::repeat_n(format!("{status:03}"), 8)
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            )
+                        }
                     }
-                    format!("{status}\n")
                 }
                 "KRDG?" | "SRDG?" if matches!(fault, Fault::MalformedReading) => "bad\n".into(),
-                "KRDG?" => {
-                    let value = state
-                        .next_kelvin
-                        .take_if(|(target, _)| *target == channel)
-                        .map_or(
-                            state.temperatures[usize::from(channel) - 1],
-                            |(_, value)| value,
-                        );
-                    format!("{:+.3}\n", value.get())
-                }
-                "SRDG?" => "+1.234\n".into(),
+                "KRDG?" => match channel {
+                    Some(channel) => {
+                        let value = state
+                            .next_kelvin
+                            .take_if(|(target, _)| *target == channel)
+                            .map_or(
+                                state.temperatures[usize::from(channel) - 1],
+                                |(_, value)| value,
+                            );
+                        format!("{:+.3}\n", value.get())
+                    }
+                    None => {
+                        let mut values = state
+                            .temperatures
+                            .iter()
+                            .map(|value| format!("{:+.3}", value.get()))
+                            .collect::<Vec<_>>();
+                        if let Some((target, value)) = state.next_kelvin.take() {
+                            values[usize::from(target) - 1] = format!("{:+.3}", value.get());
+                        }
+                        format!("{}\n", values.join(","))
+                    }
+                },
+                "SRDG?" => match channel {
+                    Some(_) => "+1.234\n".into(),
+                    None => format!("{}\n", ["+1.234"; 8].join(",")),
+                },
                 _ => return Reply::NoResponse,
             };
             drop(state);
@@ -199,6 +231,24 @@ mod tests {
         assert!(started.elapsed() >= delay);
         assert!(sim.state.lock().unwrap().next_status_delay.is_none());
         assert_eq!(query(&mut transport, "RDGST? 2"), b"0");
+    }
+
+    #[test]
+    fn batch_queries_return_all_eight_channels() {
+        let sim = LakeShoreSim::spawn().unwrap();
+        let mut transport = LoopbackTcp::connect(sim.addr(), Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            query(&mut transport, "KRDG?"),
+            b"+42.000,+42.000,+42.000,+42.000,+42.000,+42.000,+42.000,+42.000"
+        );
+        assert_eq!(
+            query(&mut transport, "RDGST?"),
+            b"000,000,000,000,000,000,000,000"
+        );
+        assert_eq!(
+            query(&mut transport, "SRDG?"),
+            b"+1.234,+1.234,+1.234,+1.234,+1.234,+1.234,+1.234,+1.234"
+        );
     }
 
     #[test]
