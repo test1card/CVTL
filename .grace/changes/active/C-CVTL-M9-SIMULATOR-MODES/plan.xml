@@ -1,0 +1,103 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M9-SIMULATOR-MODES>
+    <IntentSummary>Довести режимы до локального запуска, записи и реплея на базе 42b5db8. Одна ветвь операторских сценариев в существующем RecordingLoop, общие расчёты для прогона и реплея. Все параметры новых примеров test_only.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist><Value>.grace/changes/archive/C-CVTL-M9-HISTORICAL-HEAD/plan.xml</Value><Value>M-CVTL-SIM</Value><Value>M-CVTL-STORE</Value><Value>M-CVTL-CLI</Value><Value>M-CVTL-DAEMON</Value><Value>M-CVTL-GUI</Value></MustExist>
+      <MustContain><File>crates/cvtl-store/src/record.rs</File><Text>a1_step_v1</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist><Value>crates/cvtl-sim/src/modes.rs</Value><Value>crates/cvtl-cli/tests/operator_modes.rs</Value><Value>docs/M9_SIMULATOR_MODES.md</Value></MustExist>
+      <MustVerify><Module>M-CVTL-SIM</Module><Module>M-CVTL-STORE</Module><Module>M-CVTL-CLI</Module><Module>M-CVTL-DAEMON</Module><Module>M-CVTL-GUI</Module></MustVerify>
+      <MustContain><File>crates/cvtl-store/src/record.rs</File><Text>mode_step_v1</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="3">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="47">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-SIM /><M-CVTL-STORE /><M-CVTL-CLI /><M-CVTL-DAEMON /><M-CVTL-GUI /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-SIM /><V-M-CVTL-STORE /><V-M-CVTL-CLI /><V-M-CVTL-DAEMON /><V-M-CVTL-GUI /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.lock</File>
+      <File>crates/cvtl-sim/Cargo.toml</File>
+      <File>crates/cvtl-sim/src/lib.rs</File>
+      <File>crates/cvtl-sim/src/modes.rs</File>
+      <File>crates/cvtl-sim/src/a1.rs</File>
+      <File>crates/cvtl-sim/src/head.rs</File>
+      <File>crates/cvtl-sim/src/recording.rs</File>
+      <File>crates/cvtl-sim/tests/operator_modes.rs</File>
+      <File>crates/cvtl-store/src/record.rs</File>
+      <File>crates/cvtl-store/tests/records.rs</File>
+      <File>crates/cvtl-cli/Cargo.toml</File>
+      <File>crates/cvtl-cli/src/replay.rs</File>
+      <File>crates/cvtl-cli/src/replay/a1.rs</File>
+      <File>crates/cvtl-cli/src/replay/modes.rs</File>
+      <File>crates/cvtl-cli/src/replay/profile.rs</File>
+      <File>crates/cvtl-cli/src/export.rs</File>
+      <File>crates/cvtl-cli/src/export/table.rs</File>
+      <File>crates/cvtl-cli/tests/operator_modes.rs</File>
+      <File>crates/cvtl-daemon/src/scenario.rs</File>
+      <File>crates/cvtl-daemon/src/operator.rs</File>
+      <File>crates/cvtl-daemon/tests/operator_http.rs</File>
+      <File>ui/operator/App.svelte</File>
+      <File>ui/operator/Scenario.svelte</File>
+      <File>ui/operator/Live.svelte</File>
+      <File>ui/operator/Review.svelte</File>
+      <File>ui/operator/types.ts</File>
+      <File>ui/scripts/operator-test.mjs</File>
+      <File>docs/M9_SIMULATOR_MODES.md</File>
+      <File>docs/OPEN_QUESTIONS.md</File>
+      <File>docs/STATUS.md</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Наблюдение, мощность, профиль и удержание</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала красные аналитические тесты для ModeSetup и профиля. В sim/modes один тип режима с тегом kind: observe, constant с power_w, power_profile с парами elapsed_ms/power_w, temperature_hold с setpoint_k, virtual_body с port/body_heat_w и опциональной compensation. Таблица имеет хотя бы одну точку, начинается с 0 мс, моменты строго возрастают и представимы в целых наносекундах, мощности конечны и неотрицательны. Линейная интерполяция, точные значения в узлах, после последнего узла удержание его значения. Успешный Start с причинно подтверждённым ON задаёт начало по measured_ns принятого кадра Start. После OFF/Recover новый Start задаёт новый отсчёт. Аналитический тест таблицы 0/.75, 1000/1.25, 2000/.75 проверяет 500 мс→1 Вт и удержание .75 после конца. Постоянная мощность использует тот же M4.</Criterion>
+          <Criterion>Добавить один явно выбранный test_only_operator_modes_v1 в meta и YAML test_only.modes с типизированным режимом, необходимым BodySetup и описью для B, параметрами синтетической головки и Hold. В RecordingLoop один дискриминатор сценария для M6, прежнего A1 и новых режимов. Сохранить тот же допуск, Session и Traced. Наблюдение оставляет OffVerified, допускает измерительные такты и Stop, отвергает Arm/Start до сбора операторского кадра. Остальные режимы в выключенном состоянии пишут Observe. Период существующие 100 мс. Начальная головка до первого Start статична, после него интегрирует реальную энергию ветвей. Тело присутствует только в режиме виртуального тела. Параметры по умолчанию для новых режимов, кроме Hold, совпадают с синтетической головкой A1. Прежние профили и их конфиги сохраняют исходные байты.</Criterion>
+          <Criterion>Общий расчёт режима из снимка и входного кадра вызывают прогон и реплей. CLI использует существующий cvtl-sim как обычную зависимость вместо dev. В sim допустим существующий serde_json для типизации полного моста на границе raw. Lock меняет только связи внутри существующих версий. В raw Inputs добавить одно опциональное mode_step_v1 с пропуском None. Общая часть содержит interval_ns, interval_end_ns, фактические heater_energy_j. Прежний a1_step_v1, схема SCHEMA и Demand теги сохраняются. Новый и прежний шаг не сосуществуют. Реплей различает профили, проверяет допустимость Demand, границы и непрерывность интервалов и применение измерений из кадра. Для новых режимов пересчитать запрос, проверить и передать записанные биты существующему M4/M5. Точная сверка Control, ON/OFF, Drive и ответов сохраняется. Операции отказа и восстановления проверяются причинно, включая Start вне допустимого состояния и Unknown при потере источника.</Criterion>
+          <Criterion>Hold использует старейшую отметку из той же пригодной пары stage1/stage2 в Inputs. В новом Hold test_only M5 max_temperature_age=150 мс, M4 max_sample_age=0,5 с, allow_stale_once=false, остальные старые защиты сохраняются. При имеющейся просроченной паре сохранить наблюдение и дать M5 выставить TemperatureStale до M4. В отдельном синтетическом Hold начальные [stage1,stage2,tf]=[20,15,15.75] К, C1=10, C2=Cf=2 Дж/К, G12=0, Gf2=1 Вт/К, warm/cold отвод [0,.75] Вт, уставка 15,2 К, Kp=2 Вт/К, Ki=.5 Вт/(К·с). В локальном прогоне 200 тактов, в последних 20 отсчётах stage2=15,2±0,05 К и фактическая мощность .75±.10 Вт. В отдельных тестах после нагрева задержать RDGST канала 2 на 200 мс внутри срока чтения 250 мс для TemperatureStale и подменить один stage2 на 22 К при stage1=20 К для HeadInversion. Проверить разные raw причины, обе OFF-команды/ответа и отсутствие Drive.</Criterion>
+          <Criterion>Файловый тест с одним переиспользуемым локальным стендом проверяет Observe без ON, постоянный запрос, таблицу по raw timestamps и повторный Start, Hold и его отдельные отказы. Прогоны закрываются с OFF или явным Unknown, реплей проверяет решения и границы. Долгий тест Hold hold_tracks_stage2_on_loopback отмечается ignored в быстром наборе и обязателен отдельным запуском на каждой ОС в T-004. Подмена режима и узла профиля в снимке с пересчитанным SHA, raw запроса и at_ns в целостном кадре отвергается семантической проверкой.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-sim --test operator_modes</Command><Command>cargo test --locked -p cvtl-store --test records</Command><Command>cargo test --locked -p cvtl-cli --test operator_modes</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Порты и изменения виртуального тела</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>В новой ветви virtual_body выбрать stage2 либо tf, по умолчанию tf, и конечный неотрицательный body_heat_w, по умолчанию 0. Интегрировать Body::step с точным ранее принятым портом и возрастом до конца интервала, без тренда. Общее состояние расчёта в sim используется реплеем. В mode_step_v1.body хранить выбранный порт, удержанную температуру, её точную отметку и возраст, температуру тела, знаковый q_v и изменение. При пригодном новом кадре запрос рассчитывается по текущему порту после интеграции. P_req остаётся в Demand. Защитная остановка при просрочке следует существующему пути, с собственной причиной. Продолжение после достоверного OFF использует фактическую энергию и пригодный удержанный порт. Утрата возможности интегрировать интервал фиксируется явно, тепловой шаг не подделывается.</Criterion>
+          <Criterion>Один ожидающий типизированный запрос на mass_kg, scale, material или BridgeSetup. Старое g_w_per_k остаётся сокращением для постоянного G, одновременный G и полный мост отклоняются. Сначала завершить интервал со старыми параметрами, затем построить кандидата из архивного каталога при текущем T тела и порта, проверить совместимый поток и запрос и применить целиком. BodySetup/BridgeSetup сохраняют четыре вида моста. При изменении тела сохраняется T, dH_event=H_new−H_old, при смене только моста энтальпия сохраняется точно. Непригодный запрос сразу отклоняется. Если пригодность потеряна после прошлого интервала, сохранить старые параметры и записать отказ изменения в Inputs. Применённые и отклонённые изменения содержат запрошенные поля. В raw допустима структурная JSON-форма BridgeSetup с типизированной проверкой в sim и реплее; существующий предел raw-строки применяется до выдачи команды. Принятая проекция обновляется после записи Inputs.</Criterion>
+          <Criterion>Тесты проверяют оба порта, удержанное время и возраст, отдельный баланс с G=0 и body_heat=.125 Вт за .1 с дающий ΔH=.0125 Дж, смену OFHC→Al6061 при изменении массы/scale и моста, знаковый dH на том же T по архивному каталогу, мост-only и атомарный отказ при непригодном материале/диапазоне. Проверить насыщение и непрерывность времени. Реплей независимо пересчитывает тело/поток/запрос/изменение. Тепловой допуск 64×EPSILON×max(1, абсолютные значения, масштаб энтальпий для dH) сохраняет точность скопированных наблюдений, тегов, времени и решений M4/M5. В тестах подменить порт, отметку, материал, полный мост и dH в целостной записи.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-sim --test operator_modes</Command><Command>cargo test --locked -p cvtl-cli --test operator_modes</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Экспериментальная компенсация и доказательства OFF</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Режим B требует явного test_only включения, пригодной непустой описи и явно заданного конечного неотрицательного fixture_parasitic_w. Кривые частей загрузить из сохранённого каталога один раз и использовать fixture_heat_capacity при текущем tf. Причинная производная (tf_now−tf_prev)/(ns_now−ns_prev) из двух последовательных принятых пригодных чтений канала 3, обе отметки возрастают и свежи по тепловому сроку. До пары OFF и запрет Arm/Start. Отказ до acquire либо корректное потребление трассы и проверка M5 до ON. Записать обе отметки и измерения, производную, Cf, Q_par_f и знаковый q_v отдельно от P_req. После потери входов, OFF, сброса или Recover очистить историю tf, собрать заново из OFF. M5 сохраняет собственные причины, непригодная пара во время нагрева исключает новый Drive.</Criterion>
+          <Criterion>Переиспользовать SyntheticHead. Для B на начале теплового интервала Cf берётся из той же описи при модельном tf, Q_par_f вводится в тепловой баланс насадки отдельно от измеренных Дж нагревателей. Прежний advance использует прежнюю арифметику. Недопустимый шаг при слишком малой Cf обнаруживается в предпроверке номинального шага и при расчёте, тепловое время не перенастраивается. Использовать существующую формулу FixtureCompensation. Аналитический пример 0,2 кг OFHC при 16 К даёт Cf≈.729087800758 Дж/К. Для tf 16.01→16.00 за .1 с, T тела 30 К, G=.02 и Q_par_f=.05 Вт получаются q_v=.28 и P_req≈.157091219924 Вт. Учитывать другой выбранный порт для q_v при той же паре tf.</Criterion>
+          <Criterion>В положительном локальном прогоне использовать прежнюю голову, опись .2 кг OFHC, Q_par_f=.05 Вт и G=.05, затем проверить отрицательный запрос с одиночной подменой tf=15,8 К. Signed P_req остаётся в raw, M4 выдаёт Limited с нулевой целью, обе ветви подтверждают OFF. Свежие данные сами не возобновляют нагрев. В отдельном случае G=.60 насыщает источник, смежные интервалы и тело продолжаются. Проверить отсутствие пригодной пары и потерю чтения во время нагрева. Реплей повторяет производную, Cf и запрос, подмена производной/условий компенсации и разрыв интервала отвергаются. Для M8 общие проверенные интервалы новых режимов с фиксированной головой дают прежний анализ при пригодных условиях. В B переменная Cf обозначается явной причиной «не определяется» для действующего M8 с постоянной ёмкостью.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-sim --test operator_modes</Command><Command>cargo test --locked -p cvtl-cli --test operator_modes</Command></Verification>
+      </T-003>
+      <T-004>
+        <Title>Операторский путь, экспорт и приёмка</Title>
+        <DependsOn>T-003</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Расширить существующие Setup, RunView, Change, Scenario/Live/Review. Оставить текущие маршруты preview/run/action и один ActiveRun. API без mode сохраняет прежний A1 v2. Явные режимы используют новый профиль, preflight fingerprint включает режим и параметры. В GUI доступна явная настройка всех режимов и обоих портов, Q_par_v, редактирование материала и четырёх мостов и B с явными описью/Q_par_f. Наблюдение позволяет открыть текущий экран для измерений и Stop, вывод нагрева недоступен. Обычные режимы не получают фиктивный прогноз тела. Прогноз виртуального тела использует выбранный порт и текущий BodySetup. Предпросмотр B показывает условия и готовность, производная определяется только из наблюдений прогона. Живой экран показывает принятые изменения по seq, причину отказа, выбранный порт, q_v/P_req/P_limited/P_actual и отдельную причину OFF. При смене постоянного моста на другой убрать прежнее числовое G. Сценарий, история, Стоп, Разбор и текущий A1 сохраняются.</Criterion>
+          <Criterion>TimelineSample сохраняет legacy-проекцию и добавляет опциональные поля нового профиля. В экспорте сохранить прежнюю схему и байты старых отчётов. Для нового профиля один набор колонок CSV/Parquet расширяется режимом, уставкой hold, портом и возрастом, производной tf, Cf, паразитным притоком, принятыми материалом и мостом. q_v и P_req берутся из разных записанных полей. Схема выбирается по уже проверенному профилю при открытии таблиц, включая пустой префикс, без повторного чтения снимка. Использовать прежнюю атомарную публикацию, источники и границы реплея. Тест readback проверяет новый набор, нули/пропуски, signed запрос, изменения и SHA входов. Сверить прежние отчёты M6/A1 и контрольный экспорт M8, включая байты CSV/Parquet.</Criterion>
+          <Criterion>Локальные HTTP и браузерные проверки через действующие экраны выбирают Observe, constant, profile, hold, virtual и B, включая готовность и запись новых режимов. Проверить отказ Observe Arm/Start, наблюдение OFF, валидное и недопустимое изменение в live, новый профиль и контрольные старые архивы, просмотр/экспорт записей. Существующий полный браузерный сценарий A1 и историческая таблица остаются регрессиями. Запустить Hold 200 тактов отдельно на macOS и Ubuntu 22.04.5 ARM64. На обеих ОС выполнить fmt, build, Clippy -D warnings, весь Rust-набор, запуск с конфигом поставки и офлайн UI build/test. Ubuntu только lo. Сохранить свидетельства actual прогона и синтетические численные допущения в документах. Аппаратные значения null и запрет доступа сохраняются.</Criterion>
+          <Criterion>Измеренные максимумы трёх чистых базовых прогонов 0,33 с и 11,47 с дают бюджеты ceil(4×максимум)+1. Baseline до исполнения, свежие target/final, независимое точное ревью с гейтом простоты и APPLY. Доказательства офлайн-прогонов, старых файловых хэшей, отдельного Hold, M5 причин и регрессий UI сохраняются в STATUS и отчёте.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo fmt --all -- --check</Command><Command>cargo build --workspace --locked</Command><Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command><Command>cargo test --workspace --locked</Command><Command>cargo test --locked -p cvtl-cli --test operator_modes hold_tracks_stage2_on_loopback -- --ignored --exact --nocapture</Command><Command>npm --prefix ui run build:operator</Command><Command>npm --prefix ui run test:operator</Command></Verification>
+      </T-004>
+    </ImplementationPlan>
+  </C-CVTL-M9-SIMULATOR-MODES>
+</GraceChangePlan>
