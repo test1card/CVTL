@@ -1,0 +1,75 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M9-MAISHENG-STUB>
+    <IntentSummary>Реализовать офлайн-заготовку Maisheng на базе fee7540. Профиль R-03, отказ на границе SourceChannel и идеальная резистивная модель test_only. Приборный контур A1 и конфигурация поставки сохраняются.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist><Value>.grace/changes/archive/C-CVTL-M9-RUN-ARTIFACTS/plan.xml</Value><Value>M-CVTL-INSTRUMENTS</Value><Value>M-CVTL-SIM</Value><Value>crates/cvtl-sim/tests/a1_loop.rs</Value></MustExist>
+      <MustContain><File>crates/cvtl-instruments/src/keithley.rs</File><Text>pub trait SourceChannel</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>maisheng_1: {protocol_verified: false, enabled_for_run: false}</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>maisheng_2: {protocol_verified: false, enabled_for_run: false}</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist><Value>docs/protocols/maisheng_mp3001cr2.yaml</Value><Value>crates/cvtl-instruments/src/maisheng.rs</Value><Value>crates/cvtl-sim/src/maisheng.rs</Value><Value>crates/cvtl-sim/tests/maisheng.rs</Value></MustExist>
+      <MustVerify><Module>M-CVTL-INSTRUMENTS</Module><Module>M-CVTL-SIM</Module></MustVerify>
+      <MustContain><File>docs/protocols/maisheng_mp3001cr2.yaml</File><Text>protocol_verified: false</Text></MustContain>
+      <MustContain><File>docs/protocols/maisheng_mp3001cr2.yaml</File><Text>status: unverified</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>maisheng_1: {protocol_verified: false, enabled_for_run: false}</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>maisheng_2: {protocol_verified: false, enabled_for_run: false}</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="3">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="46">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-INSTRUMENTS /><M-CVTL-SIM /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-INSTRUMENTS /><V-M-CVTL-SIM /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>crates/cvtl-instruments/src/lib.rs</File>
+      <File>crates/cvtl-instruments/src/maisheng.rs</File>
+      <File>crates/cvtl-sim/src/lib.rs</File>
+      <File>crates/cvtl-sim/src/maisheng.rs</File>
+      <File>crates/cvtl-sim/tests/maisheng.rs</File>
+      <File>crates/cvtl-sim/tests/a1_loop.rs</File>
+      <File>docs/protocols/maisheng_mp3001cr2.yaml</File>
+      <File>docs/adr/0004-keithley-transport.md</File>
+      <File>docs/OPEN_QUESTIONS.md</File>
+      <File>docs/STATUS.md</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Справочный профиль и безопасный отказ</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала один интеграционный набор cvtl-sim/tests/maisheng.rs. Проверить ожидаемый отказ компиляции до появления API. Справочный YAML находится в docs/protocols вне config. Тест через существующий yaml_serde сверяет manufacturer, model, status, protocol_verified и явные unverified в полях transport, address, framing, commands, registers, limits, output_behavior, disconnect_behavior. Загрузчик конфигурации запуска отклоняет этот файл.</Criterion>
+          <Criterion>Публичная unit-структура MaishengStub реализует восемь методов существующего SourceChannel с безусловным InstrumentError::Unverified. Срок, канал и параметры ничего не меняют. Отдельно проверить configure, set_current, measure, output_on, output_off, output_state, errors и identity при действующем сроке и истёкшем. У заглушки нет состояния, транспорта, строк приборных команд и ложных подтверждений.</Criterion>
+          <Criterion>Существующий тест безопасных конфигов оставить без правок. В новом тесте загрузить config/simulator.yaml в память, выставить обеим ветвям protocol_verified и enabled_for_run и run_permission approved. При hardware_enabled false конфигурация разбирается, при true её отвергает существующий запрет Фазы A. Файл поставки и поведение валидатора сохраняются.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-sim --test maisheng</Command><Command>cargo test --locked -p cvtl-core</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Синтетический SourceChannel и регрессия A1</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>MaishengSim::new_test_only принимает две положительные синтетические нагрузки Ohms и хранит A/B в памяти. Начальное состояние OFF. Каждый из восьми методов проверяет абсолютный срок до действий. configure работает при OFF, принимает конечные положительные значения ChannelConfig и nplc, проверяет limit_i в заданных токовых диапазонах и limit_v в заданном диапазоне напряжения, сбрасывает уставку. До configure output_on, measure и set_current возвращают State. OFF и output_state доступны с действующим сроком и до конфигурирования. identity явно маркирована test_only, errors пуста. Номера диапазонов и паспортное поведение приборов остаются unverified.</Criterion>
+          <Criterion>Идеальный источник рассчитывает U=I×R и P=I×U. set_current и тестовый set_resistance проверяют конечный результат и границы I, U и P из синтетического ChannelConfig перед записью состояния. При выходе возвращается InvalidInput, сохраняются предыдущие нагрузка и уставка. OFF обнуляет уставку и измерения. Повторный ON без новой уставки даёт ноль. Одна ветвь не меняет другую. Keithley iv связан с TSP и loopback, Plant добавляет квантование и очереди и возвращает мощность вместо напряжения. Здесь достаточно локальной формулы идеальной нагрузки без адаптера, протокола или модели compliance.</Criterion>
+          <Criterion>Аналитический тест при I=0,25 А и R=10→20 Ом проверяет U=2,5→5 В и P=0,625→1,25 Вт при неизменной уставке. Отдельно проверить пределы I/U/P, переполнение и невалидное сопротивление, запрет конфигурирования при ON, OFF и нули, независимые A/B, истёкшие configure/set_current/ON/OFF/measure/state/identity/errors и неизменность состояния. Тесты Maisheng выполняются без bind или открытия файлов приборов.</Criterion>
+          <Criterion>В существующем closed_loop_records_feedback_scale_bridge_and_off проверить положительные Дж на каждой из двух ветвей вместо проверки суммы. Повторить текущий A1-тест на обеих ОС. RecordingLoop, демон, CLI, распределитель и файлы config остаются неизменными. В графе и verification обновить M-CVTL-INSTRUMENTS и M-CVTL-SIM. В ADR 0004 и B-09 дать ссылку на профиль, сохранить аппаратные сведения открытыми.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-sim --test maisheng</Command><Command>cargo test --locked -p cvtl-sim --test a1_loop</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Офлайн-приёмка и свидетельства</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>На macOS и Ubuntu 22.04.5 ARM64 выполнить fmt, сборку, Clippy с -D warnings, полный Rust-набор и запуск с config/simulator.yaml. В Ubuntu Cargo офлайн, прежние приборные тесты работают только через lo. Подтвердить неизменность Cargo.lock, конфигурации поставки и аппаратного запрета. Зафиксировать результаты и непроверенное в STATUS.</Criterion>
+          <Criterion>Бюджеты ceil(4 × максимум) + 1 с получены из трёх замеров чистой базы, максимумы 0,34 с для fmt и 11,05 с для тестов. Baseline до исполнения, свежие target и final, отдельное точное ревью Astra с гейтом простоты и разрешением APPLY.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo fmt --all -- --check</Command><Command>cargo build --workspace --locked</Command><Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command><Command>cargo test --workspace --locked</Command><Command>cargo run --locked -p cvtl-daemon -- config/simulator.yaml</Command></Verification>
+      </T-003>
+    </ImplementationPlan>
+  </C-CVTL-M9-MAISHENG-STUB>
+</GraceChangePlan>
