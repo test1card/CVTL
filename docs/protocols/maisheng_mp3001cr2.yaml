@@ -1,0 +1,14 @@
+# R-03. Справочный профиль протокола Maisheng.
+# Производитель и модель — обозначения из ТЗ. Проверка экземпляра не проводилась.
+manufacturer: Maisheng
+model: MP3001CR2
+status: unverified
+protocol_verified: false
+transport: unverified
+address: unverified
+framing: unverified
+commands: unverified
+registers: unverified
+limits: unverified
+output_behavior: unverified
+disconnect_behavior: unverified

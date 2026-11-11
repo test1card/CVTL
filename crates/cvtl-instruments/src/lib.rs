@@ -2,6 +2,7 @@
 
 pub mod keithley;
 pub mod lakeshore;
+pub mod maisheng;
 mod transport;
 
 pub use transport::{LoopbackTcp, MessageTransport, MAX_FRAME_BYTES};

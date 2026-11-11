@@ -59,12 +59,15 @@
     </V-M-CVTL-SAFETY>
     <V-M-CVTL-INSTRUMENTS>
       <Command>cargo test --locked -p cvtl-instruments</Command>
+      <Command>cargo test --locked -p cvtl-sim --test maisheng</Command>
       <Scenario>Фрагментация, таймаут, некорректные кадры и фаззинг ответов.</Scenario>
       <TestFiles>
         <File>crates/cvtl-instruments/tests/loopback.rs</File>
         <File>crates/cvtl-instruments/tests/response_fuzz.rs</File>
+        <File>crates/cvtl-sim/tests/maisheng.rs</File>
       </TestFiles>
       <TraceAssertion>Декодеры, таймауты и ошибки обмена проверяются на локальном loopback и байтовом корпусе.</TraceAssertion>
+      <TraceAssertion>MaishengStub отвергает все восемь методов, включая OFF, состояние, identity и истёкший срок. Справочный профиль сохраняет unverified, аппаратный путь закрыт.</TraceAssertion>
     </V-M-CVTL-INSTRUMENTS>
     <V-M-CVTL-SIM>
       <Command>cargo test --locked -p cvtl-sim</Command>
@@ -78,6 +81,7 @@
         <File>crates/cvtl-sim/tests/a1_head.rs</File>
         <File>crates/cvtl-sim/tests/a1_loop.rs</File>
         <File>crates/cvtl-sim/src/lakeshore.rs</File>
+        <File>crates/cvtl-sim/tests/maisheng.rs</File>
       </TestFiles>
       <TraceAssertion>Симуляторы воспроизводят отклик нагрузки и отказы. TCP-сценарии проверяют реакцию и подтверждения OFF.</TraceAssertion>
       <TraceAssertion>В записанном прогоне входы и intent предшествуют отправке. Отказ raw блокирует обе ветви, восстановление требует действий оператора.</TraceAssertion>
@@ -87,6 +91,7 @@
       <TraceAssertion>Короткий прогноз совпадает с эталоном первого теплового шага. Знаковый поток сохраняется, идеальный нагрев ограничен.</TraceAssertion>
       <TraceAssertion>Калибровочный профиль записывает применённую границу и скрывает эталон отвода. Все четыре запуска закрывают журнал после подтверждённого OFF.</TraceAssertion>
       <TraceAssertion>Одноразовые KRDG и RDGST ограничены каналом. Рабочий A1 фиксирует отдельные причины инверсии, устаревания и потери каждого прибора. Повторный нагрев требует Recover, Reset, Arm и Start.</TraceAssertion>
+      <TraceAssertion>Тестовый Maisheng в памяти даёт аналитические I/U на изменяемом R, проверяет синтетические границы до изменения состояния и соблюдает сроки. Обычный A1 сохраняет положительную энергию двух ветвей Keithley.</TraceAssertion>
     </V-M-CVTL-SIM>
     <V-M-CVTL-STORE>
       <Command>cargo test --locked -p cvtl-store</Command>

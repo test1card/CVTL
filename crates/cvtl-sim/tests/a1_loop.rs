@@ -234,7 +234,12 @@ fn closed_loop_records_feedback_scale_bridge_and_off() {
     assert_eq!(rows.len(), 8);
     assert!(rows.iter().all(|row| row.model_valid && row.step.is_some()));
     assert_eq!(rows[0].step.unwrap().heater_energy_j, [0.0; 2]);
-    assert!(rows[1].step.unwrap().heater_energy_j.iter().sum::<f64>() > 0.0);
+    assert!(rows[1]
+        .step
+        .unwrap()
+        .heater_energy_j
+        .iter()
+        .all(|energy| *energy > 0.0));
     let mut before = [45.0, 15.0, 16.0, 77.0];
     for row in &rows {
         let step = row.step.unwrap();
