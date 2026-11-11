@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="approved">
+<GraceChangePlan graceVersion="4.0" status="applied">
   <C-CVTL-M8-ANALYSIS>
     <IntentSummary>Рассчитать производные, Q2_eff и неопределённость по проверенным интервалам A1 на базе 02a13f2. Один численный тракт для CLI и GUI. Эталонные уровни проверяются отдельным прогоном генератора на loopback. Исполнение после отдельного утверждения плана и baseline.</IntentSummary>
     <BaselineAssertions>
