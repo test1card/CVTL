@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="draft">
+<GraceChangePlan graceVersion="4.0" status="approved">
   <C-CVTL-M9-HANDOFF>
     <IntentSummary>Подготовить комплект Фазы B и индекс сверки физики на базе 748682d. Программа и инструмент работают с сохранёнными данными. Контур управления и допуск к оборудованию остаются в существующих границах.</IntentSummary>
     <BaselineAssertions>
