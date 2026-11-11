@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="approved">
+<GraceChangePlan graceVersion="4.0" status="applied">
   <C-CVTL-M9-RUN-ARTIFACTS>
     <IntentSummary>Один локальный экспорт проверенных тактов и оценки M8 на базе f98fb41. Переиспользовать реплей и анализ CLI. Исполнение после отдельного утверждения плана и чистого baseline.</IntentSummary>
     <BaselineAssertions>
