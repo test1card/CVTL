@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="draft">
+<GraceChangePlan graceVersion="4.0" status="approved">
   <C-CVTL-M9-SIMULATOR-MODES>
     <IntentSummary>Довести режимы до локального запуска, записи и реплея на базе 42b5db8. Одна ветвь операторских сценариев в существующем RecordingLoop, общие расчёты для прогона и реплея. Все параметры новых примеров test_only.</IntentSummary>
     <BaselineAssertions>
