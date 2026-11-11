@@ -1,4 +1,4 @@
-<GraceChangePlan graceVersion="4.0" status="draft">
+<GraceChangePlan graceVersion="4.0" status="approved">
   <C-CVTL-M9-MAISHENG-STUB>
     <IntentSummary>Реализовать офлайн-заготовку Maisheng на базе fee7540. Профиль R-03, отказ на границе SourceChannel и идеальная резистивная модель test_only. Приборный контур A1 и конфигурация поставки сохраняются.</IntentSummary>
     <BaselineAssertions>
