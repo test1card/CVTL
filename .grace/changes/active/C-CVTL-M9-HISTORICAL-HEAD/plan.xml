@@ -1,0 +1,76 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M9-HISTORICAL-HEAD>
+    <IntentSummary>Один исполняемый исторический сценарий на базе 82ac054. Расчёт шести опор и продолжения используется локальным API, экраном «Сценарий» и скачиваемым JSON. Действующие архивы и эталоны A1 сохраняются.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist><Value>.grace/changes/archive/C-CVTL-M9-MAISHENG-STUB/plan.xml</Value><Value>data/machines/kde420sa_stage1_data.csv</Value><Value>M-CVTL-SIM</Value><Value>M-CVTL-DAEMON</Value><Value>M-CVTL-GUI</Value></MustExist>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustContain><File>crates/cvtl-sim/src/recording.rs</File><Text>pub fn preview_a1</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist><Value>crates/cvtl-sim/src/historical_head.rs</Value><Value>crates/cvtl-sim/tests/historical_head.rs</Value><Value>docs/M9_HISTORICAL_HEAD.md</Value></MustExist>
+      <MustVerify><Module>M-CVTL-SIM</Module><Module>M-CVTL-DAEMON</Module><Module>M-CVTL-GUI</Module></MustVerify>
+      <MustContain><File>crates/cvtl-daemon/src/main.rs</File><Text>/api/historical-head</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="3">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="46">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-SIM /><M-CVTL-DAEMON /><M-CVTL-GUI /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-SIM /><V-M-CVTL-DAEMON /><V-M-CVTL-GUI /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.lock</File>
+      <File>crates/cvtl-sim/Cargo.toml</File>
+      <File>crates/cvtl-sim/src/lib.rs</File>
+      <File>crates/cvtl-sim/src/historical_head.rs</File>
+      <File>crates/cvtl-sim/tests/historical_head.rs</File>
+      <File>crates/cvtl-sim/tests/m6_recording.rs</File>
+      <File>crates/cvtl-daemon/src/main.rs</File>
+      <File>crates/cvtl-daemon/tests/operator_http.rs</File>
+      <File>ui/operator/Scenario.svelte</File>
+      <File>ui/operator/types.ts</File>
+      <File>ui/scripts/operator-test.mjs</File>
+      <File>docs/M9_HISTORICAL_HEAD.md</File>
+      <File>docs/OPEN_QUESTIONS.md</File>
+      <File>docs/STATUS.md</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Расчёт исторической характеристики</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала аналитические тесты. Новый HistoricalHead::new_test_only читает встроенные байты канонического трёхколоночного CSV и проверяет точный заголовок, ровно шесть строк, конечные значения, положительные возрастающие stage2, неотрицательную неубывающую мощность, неубывающую stage1 без инверсии и последнюю stage2 ниже 300 К. Парсер приватный, malformed-случаи проверяются рядом с ним. at(Kelvin) принимает stage2 в замкнутом диапазоне 4,95–300 К, вне диапазона возвращает ошибку. На опорах возвращает исходные числа точно. Между опорами P_net и stage1 интерполируются линейно.</Criterion>
+          <Criterion>Плановые числа продолжения synthetic test_only. Пусть T=stage2, T0=23,4 К, D=300−T0, g0=43,8−23,4=20,4 К и s=(22−12)/(23,4−16,4)=10/7 Вт/К. При T выше T0 рассчитывать stage1=T+g0×(1−(T−T0)/D), P_net=22+s×(T−T0). Это непрерывность C0 на стыке. Обе величины не убывают, stage1 не ниже stage2 до 300 К. Значения служат координатами исторического синтетического сценария. Они не поступают в источник мощности или оценку Q2_eff.</Criterion>
+          <Criterion>Аналитические эталоны stage2=6,62 К дают P_net=0,97 Вт и stage1=28,55 К; 19,9 К дают 17 Вт и 41,4 К; 161,7 К дают 219,57142857142857 Вт и 171,9 К; 300 К дают 417,14285714285717 Вт и 300 К. Допуск вычисленных чисел 1e-10 К/Вт, опоры сверяются точно. Проверить края, соседние представимые числа по обе стороны T0 и отказ за диапазоном. Проверка 1001 равномерной точки дополняет аналитическое обоснование монотонности и неинверсии линейных участков.</Criterion>
+          <Criterion>Один сериализуемый отчёт вычисляет все шесть опор, пять их середин и continuation-точки 50,100,200,300 К. Точки отсортированы, имеют origin historical_anchor/interpolated/synthetic и необязательный номер исходной строки. Отчёт хранит synthetic=true, test_only=true, путь и SHA-256 канонических байтов, номера опор 1–6, исторические условия без жидкого азота и экрана, паразитные притоки включены, границы и численные параметры продолжения. В sim добавить существующие serde и sha2 без новых внешних пакетов; только dev-зависимость cvtl-analysis даёт StageI в тестах. В lock меняются внутренние связи sim, существующие версии сохраняются.</Criterion>
+          <Criterion>Тест повторно использует StageI::from_legacy_csv и сверяет nominal_csv с каноническим файлом. Исходный канонический SHA-256 b69a6969815184f8b88e384810d14e5dd05cf7c7df40523e668d918250906691, legacy SHA-256 1c4f35ebabe730dd223084f27d0338132d5bf3b8b5795bc679f5f6db521e7a7d. Байты источников сохраняются. Строки 7 и 8 отсутствуют среди номинальных опор.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-sim --test historical_head</Command><Command>cargo test --locked -p cvtl-sim --lib</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Строка 7 в существующем тракте защиты</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>В существующем m6_recording добавить тест с переиспользованием spawn_file, snapshot, start и ожидания. Из StageI взять points()[6], подтвердить row=7, stage1=39,8 К, stage2=41,3 К, опубликованные 34,1 Вт и inverted=true, nominal_anchor=false. До Recover/Arm/Start задать единый кадр Lake Shore stage1=40 К, stage2=38 К, tf=38 К, jacket=77 К. Два своевременных такта по 100 мс подтверждают положительный нагрев существующего M6. Следом одним set_temperatures установить пару строки 7 и выполнить следующий штатный такт. Подведённые 34,1 Вт сохраняются как происхождение точки в выводе теста и документе. Команда нагревателя остаётся действующим запросом 0,75 Вт.</Criterion>
+          <Criterion>Подтвердить HeadInversion первой причиной, FaultLatched, обе Off-intent, причинно следующие нулевые ответы выходов A/B и OutputEvidence off_verified в том же отказном такте. Drive и Control в этом такте отсутствуют. Фактическая мощность эмулятора равна нулю по обеим ветвям, новый Arm и Start без восстановления отклоняются. Запись закрывается с проверенным raw. Пороги M5 и модель A1 сохраняются. Темп до 33 К/с остаётся внутри действующего test_only предела 100 К/с, чтобы сохранить самостоятельную причину инверсии.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-sim --test m6_recording</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Локальный вызов, GUI и приёмка</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>GET /api/historical-head вызывает модель и возвращает тот же детерминированный JSON отчёта. HTTP-тест сверяет повторяемость байтов, все 15 точек, маркировку и конечную 300 К. Запрос сохраняет исходные state/job и каталог runs, не готовит активный прогон. Ошибка расчёта возвращает явную диагностику. Для сериализации использовать отчёт sim, без второго расчёта в демоне.</Criterion>
+          <Criterion>На существующем экране «Сценарий» добавить отдельную кнопку расчёта исторической характеристики, локальные busy/error/result, таблицу температур и мощности с происхождением строк и ссылку download на тот же GET. Подписи на русском, единицы видны. Явно показать условия этапа I, невычтенные паразитные притоки и участок synthetic. Обычные Setup, App, подготовка и 31-точечный предпросмотр сохраняются. В историческом расчёте используются 6 опор + 5 середин + 4 синтетические точки. Вычисление само по себе оставляет «Подготовить прогон» выключенной.</Criterion>
+          <Criterion>Расширить существующий operator-test.mjs. Сравнить API, все строки таблицы и скачанные JSON-байты. Проверить desktop и 360 CSS px без переполнения, состояния расчёта и отсутствие внешних запросов. После исторического расчёта выполнить весь действующий сценарий A1, изменения параметров, OFF, реплей и анализ. Сохранить скриншоты и журнал в локальных свидетельствах. На macOS ARM64 и Ubuntu 22.04.5 ARM64 прогнать fmt, сборку, Clippy с -D warnings, полный Rust-набор, конфиг поставки, UI build и браузерный тест. Использовать Node22 и существующий офлайн-кэш. Проверить прежние отчёты двух v1 архивов и реплей/анализ одного сохранённого M8 run-01 с прежними SHA-256.</Criterion>
+          <Criterion>Обновить только согласованные граф, verification и документы. В отчёте описать уравнения, численные синтетические допущения, источник, инверсию и границы применимости для будущей сверки физики. Бюджеты ceil(4 × максимум) + 1 с определены по трём базовым прогонам с максимумами 0,32 с и 11,19 с. Baseline до исполнения, свежие target/final и отдельный APPLY после независимого ревью Astra с гейтом простоты. Физические приборы недоступны, Ubuntu-тесты идут только с lo.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo fmt --all -- --check</Command><Command>cargo build --workspace --locked</Command><Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command><Command>cargo test --workspace --locked</Command><Command>npm --prefix ui run build:operator</Command><Command>npm --prefix ui run test:operator</Command></Verification>
+      </T-003>
+    </ImplementationPlan>
+  </C-CVTL-M9-HISTORICAL-HEAD>
+</GraceChangePlan>
