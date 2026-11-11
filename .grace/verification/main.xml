@@ -147,9 +147,11 @@
     <V-M-CVTL-CLI>
       <Command>cargo test --locked -p cvtl-cli</Command>
       <Command>cargo test --locked -p cvtl-cli --example m9_a1_acceptance</Command>
+      <Command>python3 -m unittest discover -s tools/phase_b</Command>
       <Scenario>Команды wire и heater-advisor на тестовых входах.</Scenario>
       <Scenario>Офлайн-реплей файлового журнала, пересчёт M4/M5, проверка происхождения и неполного префикса.</Scenario>
       <Scenario>Детерминированный импорт этапа I с происхождением и хэшем фактического источника.</Scenario>
+      <Scenario>Офлайн-обработка сохранённой таблицы Фазы B с заданной ступенью и пропусками.</Scenario>
       <TestFiles>
         <File>crates/cvtl-cli/tests/m2_cli.rs</File>
         <File>crates/cvtl-cli/tests/m6_replay.rs</File>
@@ -158,6 +160,7 @@
         <File>crates/cvtl-cli/tests/m6_import.rs</File>
         <File>crates/cvtl-cli/tests/operator_modes.rs</File>
         <File>crates/cvtl-cli/examples/m9_a1_acceptance.rs</File>
+        <File>tools/phase_b/test_measure.py</File>
       </TestFiles>
       <TraceAssertion>Проверяются расчёт проводки, вывод области нагревателя и обработка отсутствующих данных.</TraceAssertion>
       <TraceAssertion>Повторный расчёт сравнивается с сохранёнными решениями. Ошибка кадра и неполный такт различаются, а состояние выхода требует причинно связанных ответов обеих ветвей.</TraceAssertion>
@@ -169,6 +172,7 @@
       <TraceAssertion>Тесты разделяют численное округление пересчитанных тепловых полей и точную сверку удержанного tf, решений M4/M5 и команд. Реплей и оценка M8 сверяются на macOS и Ubuntu на одних архивных байтах.</TraceAssertion>
       <TraceAssertion>Экспорт записывает полный семантически проверенный ряд в согласованные CSV и Parquet. Префикс, квитанция и оценка M8 различаются. Повтор и сбой публикации сохраняют первичные файлы и связность HTML с набором.</TraceAssertion>
       <TraceAssertion>Файловые прогоны и реплей проверяют профиль мощности, удержание, оба порта тела, компенсацию, насыщение и OFF. CSV и Parquet выбирают схему по проверенному профилю и сохраняют разные значения потока и запроса.</TraceAssertion>
+      <TraceAssertion>Файловый инструмент Фазы B сверяет порядок отсчётов, покрытие, SHA-256, задержки, ошибки относительно эталона и доступной уставки и установление после ступени. Синтетический пример воспроизводится на Python 3.10 и 3.14 без изменения входов.</TraceAssertion>
     </V-M-CVTL-CLI>
   </VD-MAIN>
 </GraceVerificationDocument>

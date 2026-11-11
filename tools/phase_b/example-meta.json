@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "origin": {
+    "kind": "test_only",
+    "description": "Пять синтетических тактов для проверки расчёта"
+  },
+  "passport": {
+    "run_id": "synthetic-step-01",
+    "host": "Синтетические часы",
+    "source": "Синтетическая пара каналов A и B",
+    "thermometer": "Синтетический вход",
+    "transport": "Сохранённая таблица",
+    "load": "Синтетическая резистивная нагрузка",
+    "power_reference": "Расчётный эталон",
+    "conditions": "Мощность и задержки заданы для теста"
+  },
+  "period_ns": 100000000,
+  "steady_ticks": [3, 5],
+  "step": {"tick": 2, "last_tick": 5}
+}
