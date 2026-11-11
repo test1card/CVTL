@@ -197,6 +197,50 @@ fn read_response(mut stream: TcpStream) -> (u16, Vec<u8>) {
 }
 
 #[test]
+fn historical_head_reports_one_calculation_without_preparing_a_run() {
+    let daemon = Daemon::start(false);
+    let state = daemon.get("/api/state");
+    let job = daemon.get("/api/job");
+    assert!(state["run"].is_null() && job.is_null());
+    let request = format!(
+        "GET /api/historical-head HTTP/1.1\r\nHost: {}\r\n\r\n",
+        daemon.host
+    );
+    let (status, first) = daemon.raw(&request);
+    assert_eq!(status, 200);
+    assert_eq!(daemon.raw(&request), (status, first.clone()));
+    let computed = cvtl_sim::historical_head::report().unwrap();
+    assert_eq!(first, serde_json::to_vec(&computed).unwrap());
+
+    let report: Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(report["nominal_rows"], json!([1, 2, 3, 4, 5, 6]));
+    assert_eq!(report["synthetic"], true);
+    assert_eq!(report["test_only"], true);
+    let points = report["points"].as_array().unwrap();
+    assert_eq!(points.len(), 15);
+    for (origin, count) in [
+        ("historical_anchor", 6),
+        ("interpolated", 5),
+        ("synthetic", 4),
+    ] {
+        assert_eq!(
+            points
+                .iter()
+                .filter(|point| point["origin"] == origin)
+                .count(),
+            count
+        );
+    }
+    let end = &points[14];
+    assert_eq!(end["stage2_k"], 300.0);
+    assert_eq!(end["stage1_k"], 300.0);
+    assert_eq!(end["origin"], "synthetic");
+    assert_eq!(daemon.get("/api/state"), state);
+    assert_eq!(daemon.get("/api/job"), job);
+    assert_eq!(fs::read_dir(daemon.root.join("runs")).unwrap().count(), 0);
+}
+
+#[test]
 fn http_requires_local_identity_and_bounded_unambiguous_body() {
     let daemon = Daemon::start(false);
     let request = |headers: &str| {

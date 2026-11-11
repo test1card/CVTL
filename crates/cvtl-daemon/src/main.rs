@@ -147,6 +147,11 @@ impl App {
     fn handle(&mut self, request: Request) -> Result<Response, Response> {
         let response = match (request.method, request.path.as_str()) {
             (Method::Get, "/api/defaults") => Response::json(200, &Setup::default()),
+            (Method::Get, "/api/historical-head") => {
+                let report = cvtl_sim::historical_head::report()
+                    .map_err(|reason| Response::error(503, reason))?;
+                Response::json(200, &report)
+            }
             (Method::Get, "/api/state") => Response::json(200, &self.owner.snapshot()),
             (Method::Get, "/api/job") => {
                 let last = self.reader.state.lock().unwrap().last.clone();

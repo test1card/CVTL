@@ -238,6 +238,7 @@ dependencies = [
 name = "cvtl-sim"
 version = "0.1.0"
 dependencies = [
+ "cvtl-analysis",
  "cvtl-control",
  "cvtl-core",
  "cvtl-envelope",
@@ -246,6 +247,8 @@ dependencies = [
  "cvtl-physics",
  "cvtl-safety",
  "cvtl-store",
+ "serde",
+ "sha2",
  "yaml_serde",
 ]
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -74,6 +74,111 @@ try {
     if (screenshotDir) await page.screenshot({ path: resolve(screenshotDir, name + ".png"), fullPage: true });
   };
 
+  async function checkHistoricalHead() {
+    const panel = page.getByRole("region", { name: "Историческая характеристика головки", exact: true });
+    const calculate = panel.getByRole("button", { name: "Рассчитать характеристику", exact: true });
+    const historicalUrl = `${origin}/api/historical-head`;
+    assert.equal((await snapshot()).run, null);
+    assert.ok(await button("Подготовить прогон").isDisabled());
+
+    const failure = "Учебный сбой расчёта характеристики";
+    await page.route(historicalUrl, (route) => route.fulfill({ status: 503, json: { error: failure } }), { times: 1 });
+    await calculate.click();
+    const alert = panel.getByRole("alert");
+    await alert.waitFor();
+    assert.equal(await alert.textContent(), failure);
+    assert.equal(await panel.getByRole("table").count(), 0);
+
+    const hold = Promise.withResolvers();
+    await page.route(historicalUrl, async (route) => {
+      await hold.promise;
+      await route.continue();
+    }, { times: 1 });
+    const [response] = await Promise.all([
+      page.waitForResponse((result) => result.url() === historicalUrl),
+      (async () => {
+        try {
+          await calculate.click();
+          await panel.getByRole("status").waitFor();
+          assert.ok(await calculate.isDisabled());
+        } finally {
+          hold.resolve();
+        }
+      })(),
+    ]);
+    assert.equal(response.request().method(), "GET");
+    assert.ok(response.ok());
+    const apiBytes = await response.body();
+    const report = JSON.parse(apiBytes.toString("utf8"));
+    assert.equal(report.synthetic, true);
+    assert.equal(report.test_only, true);
+    assert.deepEqual(report.nominal_rows, [1, 2, 3, 4, 5, 6]);
+    assert.equal(report.liquid_nitrogen, false);
+    assert.equal(report.radiation_shield, false);
+    assert.equal(report.parasitics_removed, false);
+    assert.equal(report.points.length, 15);
+    assert.equal(report.continuation_to_k, 300);
+
+    const table = panel.getByRole("table");
+    await table.waitFor();
+    assert.ok(await calculate.isEnabled());
+    assert.equal(await alert.count(), 0);
+    assert.deepEqual(await table.getByRole("columnheader").allTextContents(), ["stage2, К", "stage1, К", "P_net, Вт", "Происхождение"]);
+    await panel.getByText(report.source_path, { exact: true }).waitFor();
+    await panel.getByText("Опыт этапа I проходил без жидкого азота и экрана. P_net — подведённая мощность с невычтенными паразитными притоками.").waitFor();
+    const number = new Intl.NumberFormat("ru-RU", { maximumSignificantDigits: 5 });
+    const originLabel = {
+      historical_anchor: "Опора этапа I",
+      interpolated: "Интерполяция",
+      synthetic: "Синтетическое продолжение",
+    };
+    const expectedRows = report.points.map((point) => [
+      number.format(point.stage2_k),
+      number.format(point.stage1_k),
+      number.format(point.p_net_w),
+      originLabel[point.origin] + (point.source_row === null ? "" : ` · строка ${point.source_row}`),
+    ]);
+    const rows = table.locator("tbody tr");
+    const renderedRows = () => rows.evaluateAll((elements) => elements.map((row) =>
+      Array.from(row.cells, (cell) => cell.textContent.trim())));
+    assert.deepEqual(await renderedRows(), expectedRows);
+    await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth + 1);
+
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      panel.getByRole("link", { name: "Скачать JSON", exact: true }).click(),
+    ]);
+    assert.equal(download.suggestedFilename(), "cvtl-historical-head.json");
+    const downloadedBytes = await readFile(await download.path());
+    assert.deepEqual(downloadedBytes, apiBytes);
+    if (screenshotDir) {
+      await writeFile(resolve(screenshotDir, "historical-head.json"), downloadedBytes);
+      await panel.screenshot({ path: resolve(screenshotDir, "historical-head.png") });
+    }
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.waitForFunction(() => document.documentElement.scrollWidth <= innerWidth + 1);
+    assert.ok(await panel.locator(".table-wrap").evaluate((wrapper) => wrapper.scrollWidth <= wrapper.clientWidth + 1));
+    assert.ok(await rows.locator("td:nth-child(-n+3)").evaluateAll((cells) => cells.every((cell) => {
+      const contents = document.createRange();
+      contents.selectNodeContents(cell);
+      return contents.getClientRects().length === 1;
+    })));
+    assert.deepEqual(await renderedRows(), expectedRows);
+    const mobileWidth = await page.evaluate(() => innerWidth);
+    if (screenshotDir) await panel.screenshot({ path: resolve(screenshotDir, "historical-head-mobile.png") });
+    await page.setViewportSize({ width: 1280, height: 920 });
+    assert.ok(await button("Подготовить прогон").isDisabled());
+    assert.equal((await snapshot()).run, null);
+    return {
+      points: report.points.length,
+      continuation_to_k: report.continuation_to_k,
+      source_sha256: report.source_sha256,
+      download_matches: true,
+      mobile_width: mobileWidth,
+    };
+  }
+
   async function prepare(capture = false) {
     await screen("Сценарий");
     await button("Рассчитать прогноз").click();
@@ -116,6 +221,7 @@ try {
 
   await page.goto(origin);
   await page.getByText("Симуляция", { exact: true }).waitFor();
+  const historicalHead = await checkHistoricalHead();
   const first = await prepare(true);
   await start(true);
   await page.getByLabel("Новая масса, кг", { exact: true }).fill("16");
@@ -214,6 +320,7 @@ try {
     platform: process.platform,
     architecture: process.arch,
     configured_locale: "en-US@posix",
+    historical_head: historicalHead,
     first_run_ticks: live.samples_seen,
     live_window: live.samples.length,
     stop_to_off_ms: Math.round(stopMs),

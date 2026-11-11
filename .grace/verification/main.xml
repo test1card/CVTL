@@ -82,6 +82,7 @@
         <File>crates/cvtl-sim/tests/a1_loop.rs</File>
         <File>crates/cvtl-sim/src/lakeshore.rs</File>
         <File>crates/cvtl-sim/tests/maisheng.rs</File>
+        <File>crates/cvtl-sim/tests/historical_head.rs</File>
       </TestFiles>
       <TraceAssertion>Симуляторы воспроизводят отклик нагрузки и отказы. TCP-сценарии проверяют реакцию и подтверждения OFF.</TraceAssertion>
       <TraceAssertion>В записанном прогоне входы и intent предшествуют отправке. Отказ raw блокирует обе ветви, восстановление требует действий оператора.</TraceAssertion>
@@ -92,6 +93,7 @@
       <TraceAssertion>Калибровочный профиль записывает применённую границу и скрывает эталон отвода. Все четыре запуска закрывают журнал после подтверждённого OFF.</TraceAssertion>
       <TraceAssertion>Одноразовые KRDG и RDGST ограничены каналом. Рабочий A1 фиксирует отдельные причины инверсии, устаревания и потери каждого прибора. Повторный нагрев требует Recover, Reset, Arm и Start.</TraceAssertion>
       <TraceAssertion>Тестовый Maisheng в памяти даёт аналитические I/U на изменяемом R, проверяет синтетические границы до изменения состояния и соблюдает сроки. Обычный A1 сохраняет положительную энергию двух ветвей Keithley.</TraceAssertion>
+      <TraceAssertion>Историческая модель возвращает шесть точных опор, интерполирует и рассчитывает синтетический участок до 300 К. Строка 7 отдельно защёлкивает HeadInversion после положительного нагрева и подтверждает OFF обеих ветвей.</TraceAssertion>
     </V-M-CVTL-SIM>
     <V-M-CVTL-STORE>
       <Command>cargo test --locked -p cvtl-store</Command>
@@ -127,6 +129,7 @@
       <TraceAssertion>Демон отклоняет чужие Host и Origin, некорректное тело и устаревшую команду. Stop снимает ожидающее действие. Реальный HTTP-прогон проверяет Unknown, подтверждённый OFF и ручной сброс.</TraceAssertion>
       <TraceAssertion>Разбор использует тот же анализ проверенного архива, что автономная команда.</TraceAssertion>
       <TraceAssertion>После завершения дочернего процесса под нагрузкой прежний raw не меняется. Новый процесс с тем же корнем подтверждает OFF и принимает нагрев после явных Arm и Start в новом прогоне.</TraceAssertion>
+      <TraceAssertion>Повторный GET исторической характеристики даёт побайтно тот же расчёт из cvtl-sim. Очередь, активный прогон и каталог записей остаются в исходном состоянии.</TraceAssertion>
     </V-M-CVTL-DAEMON>
     <V-M-CVTL-GUI>
       <Command>npm --prefix ui run test:operator</Command>
@@ -134,6 +137,7 @@
       <TestFiles><File>ui/scripts/operator-test.mjs</File></TestFiles>
       <TraceAssertion>Playwright проверяет применение параметров по seq, окно 240 после не менее 250 тактов, OFF, реплей, отображение сбоя сохранения квитанции, две темы, 360 и 1280 CSS px, нестандартную локаль и локальность запросов.</TraceAssertion>
       <TraceAssertion>Результат M8 в браузере совпадает с CLI. Длинное окно покрывает известный отвод, короткая запись даёт статус «не определяется».</TraceAssertion>
+      <TraceAssertion>Таблица исторической характеристики и скачанный JSON совпадают с отчётом API. Видны опоры, интерполяция, синтетическое продолжение и условия этапа I на desktop и 360 CSS px.</TraceAssertion>
     </V-M-CVTL-GUI>
     <V-M-CVTL-CLI>
       <Command>cargo test --locked -p cvtl-cli</Command>

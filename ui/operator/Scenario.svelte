@@ -1,6 +1,6 @@
 <script lang="ts">
   import Plot from "./Plot.svelte";
-  import type { Estimate, PlotSeries, Setup, Theme } from "./types";
+  import type { Estimate, HistoricalReport, PlotSeries, Setup, Theme } from "./types";
 
   type Bridge = Setup["body"]["bridge"];
   type Node = Setup["wiring"][number]["from"];
@@ -54,6 +54,37 @@
     maximumSignificantDigits: 5,
     signDisplay: "exceptZero",
   });
+  const historicalPath = "/api/historical-head";
+  const originLabels = {
+    historical_anchor: "Опора этапа I",
+    interpolated: "Интерполяция",
+    synthetic: "Синтетическое продолжение",
+  } as const;
+  let historicalReport = $state<HistoricalReport | null>(null);
+  let historicalBusy = $state(false);
+  let historicalError = $state<string | null>(null);
+
+  async function calculateHistoricalHead() {
+    historicalBusy = true;
+    historicalError = null;
+    historicalReport = null;
+    try {
+      const response = await fetch(historicalPath, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(1500),
+      });
+      if (response.ok) {
+        historicalReport = await response.json();
+      } else {
+        const failure = await response.json();
+        historicalError = failure.error ?? "Расчёт исторической характеристики недоступен";
+      }
+    } catch {
+      historicalError = "Не удалось получить историческую характеристику";
+    } finally {
+      historicalBusy = false;
+    }
+  }
 
   function nodeLabel(id: string): string {
     return nodes.find((node) => node.id === id)?.label ?? id;
@@ -340,6 +371,46 @@
   </section>
 </div>
 
+<section class="panel historical-head" aria-labelledby="historical-head-title">
+  <h3 id="historical-head-title">Историческая характеристика головки</h3>
+  <div class="actions">
+    <button type="button" class="secondary" disabled={historicalBusy} onclick={calculateHistoricalHead}>
+      Рассчитать характеристику
+    </button>
+    {#if historicalReport}
+      <a href={historicalPath} download="cvtl-historical-head.json">Скачать JSON</a>
+    {/if}
+  </div>
+  {#if historicalBusy}
+    <p role="status">Выполняется расчёт характеристики</p>
+  {:else if historicalError}
+    <p class="notice error" role="alert">{historicalError}</p>
+  {:else if historicalReport}
+    <p class="muted">Опыт этапа I проходил без жидкого азота и экрана. P_net — подведённая мощность с невычтенными паразитными притоками.</p>
+    <p class="muted">Источник <code>{historicalReport.source_path}</code></p>
+    <p class="muted">
+      Выше {format.format(historicalReport.continuation_from_k)} К характеристика синтетически продолжена до {format.format(historicalReport.continuation_to_k)} К.
+    </p>
+    <div class="table-wrap">
+      <table aria-label="Точки исторической характеристики головки">
+        <thead>
+          <tr><th scope="col">stage2, К</th><th scope="col">stage1, К</th><th scope="col">P_net, Вт</th><th scope="col">Происхождение</th></tr>
+        </thead>
+        <tbody>
+          {#each historicalReport.points as point (point.stage2_k)}
+            <tr>
+              <td>{format.format(point.stage2_k)}</td>
+              <td>{format.format(point.stage1_k)}</td>
+              <td>{format.format(point.p_net_w)}</td>
+              <td>{originLabels[point.origin]}{point.source_row === null ? "" : ` · строка ${point.source_row}`}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  {/if}
+</section>
+
 <style>
   .scenario-layout {
     display: grid;
@@ -378,7 +449,16 @@
     border-top: 1px solid var(--line);
   }
   .wire-results small { overflow-wrap: anywhere; }
+  .historical-head { margin-top: 1rem; }
+  .historical-head a { color: var(--accent); }
+  .historical-head code { overflow-wrap: anywhere; }
+  .historical-head .notice { margin-top: 0.85rem; }
   @media (max-width: 860px) {
     .scenario-layout { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 480px) {
+    .historical-head th, .historical-head td { padding-inline: 0.32rem; }
+    .historical-head td:nth-child(-n + 3) { white-space: nowrap; }
+    .historical-head th:last-child, .historical-head td:last-child { overflow-wrap: anywhere; }
   }
 </style>

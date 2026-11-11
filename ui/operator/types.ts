@@ -34,6 +34,30 @@ export interface PreviewPoint {
   heater_w: number;
 }
 
+interface HistoricalPoint {
+  stage1_k: number;
+  stage2_k: number;
+  p_net_w: number;
+  origin: "historical_anchor" | "interpolated" | "synthetic";
+  source_row: number | null;
+}
+
+export interface HistoricalReport {
+  synthetic: boolean;
+  test_only: boolean;
+  source_path: string;
+  source_sha256: string;
+  nominal_rows: number[];
+  liquid_nitrogen: boolean;
+  radiation_shield: boolean;
+  parasitics_removed: boolean;
+  continuation_from_k: number;
+  continuation_to_k: number;
+  power_slope_w_per_k: number;
+  stage_gap_at_start_k: number;
+  points: HistoricalPoint[];
+}
+
 export interface Limits {
   envelope_source_w: [number, number];
   envelope_heater_w: [number, number];

@@ -11,6 +11,7 @@
 // START_MODULE_MAP
 //   a1 - closed-loop thermal scenario
 //   head - synthetic thermal step
+//   historical_head - Stage I characteristic and synthetic continuation
 //   keithley - loopback power source
 //   lakeshore - loopback thermometer
 //   maisheng - in-memory test-only source interface
@@ -21,6 +22,7 @@
 
 mod a1;
 pub mod head;
+pub mod historical_head;
 pub mod keithley;
 pub mod lakeshore;
 mod loopback;
