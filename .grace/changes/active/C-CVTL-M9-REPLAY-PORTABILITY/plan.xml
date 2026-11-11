@@ -1,0 +1,54 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M9-REPLAY-PORTABILITY>
+    <IntentSummary>Проверить переносимость одного набора архивов на базе 049a171. Допуск относится к округлению пяти вычисляемых полей A1. Рабочий контур, физика, сохранённые данные и точная проверка M4/M5 сохраняют прежний контракт.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist><Value>.grace/changes/archive/C-CVTL-M9-A1-ACCEPTANCE/plan.xml</Value><Value>M-CVTL-CLI</Value><Value>crates/cvtl-cli/src/replay/a1.rs</Value><Value>crates/cvtl-cli/tests/m7_a1_replay.rs</Value></MustExist>
+      <MustContain><File>crates/cvtl-cli/tests/m7_a1_replay.rs</File><Text>configured_mass_scale_and_g_changes_replay_with_signed_enthalpy</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustVerify><Module>M-CVTL-CLI</Module></MustVerify>
+      <MustExist><Value>docs/M9_REPLAY_PORTABILITY.md</Value></MustExist>
+      <MustContain><File>crates/cvtl-cli/tests/m7_a1_replay.rs</File><Text>roundoff_applies_only_to_recomputed_thermal_values</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="3">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="44">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-CLI /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-CLI /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>crates/cvtl-cli/src/replay/a1.rs</File>
+      <File>crates/cvtl-cli/tests/m7_a1_replay.rs</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/M9_REPLAY_PORTABILITY.md</File>
+      <File>docs/STATUS.md</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Сравнение теплового пересчёта и точный вход M4/M5</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала добавить регрессии в существующий m7_a1_replay и тест численной границы рядом со сравнением. Через Run::alter менять исходные записи в целостном кадре. Один ULP вычисленной температуры тела, температуры до и после смены и знакового dH_event допускается. Подмена каждого из этих четырёх полей и запроса мощности на 1e-8 в его единицах при штатных параметрах fixture отклоняется с диагностикой соответствующего поля и seq. Замена отрицательного dH на его положительный модуль вне границы округления отклоняется. Отдельно один ULP удержанного tf отклоняется на точной тепловой сверке. Один ULP записанного запроса проходит тепловую сверку, затем отклоняется точной сверкой записанного результата M4.</Criterion>
+          <Criterion>В одном ThermalReplay::advance оставить точное побитовое сравнение удержанного tf. У тела, температур до и после смены, dH_event и запроса проверять конечность обоих чисел и abs(пересчитано − записано) ≤ 64 × f64::EPSILON × max(1, abs(пересчитано), abs(записано), S) в единицах поля. Для температур и мощности S=1, для dH_event S=max(abs(H до), abs(H после)) из того же пересчитанного тела. Сравнивать знаковые числа. Масштаб dH учитывает округление при вычитании энтальпий. Тестировать равенство, границу и соседнее число за ней, близость к нулю, относительный масштаб, переполнение разности и нечисловые аргументы. Допуск относится к реплею, физические параметры и уравнения остаются прежними.</Criterion>
+          <Criterion>Численная основа для 64 × epsilon — диагностические максимумы M8 2,84e-14 К и 1,11e-15 Вт. При 30 К граница составляет около 4,26e-13 К, при мощности до 1 Вт около 1,42e-14 Вт. Диагностика отдельной шеститактовой записи со сменой массы и scale дала одинаковые dH обеих ОС около −194, +194 и +78 Дж при энтальпиях 194–466 Дж. Предел 64 × epsilon × S при 466 Дж равен около 6,62e-12 Дж. dH проверяется отдельным архивом со сменой scale и существующим тестом configured_mass_scale_and_g_changes_replay_with_signed_enthalpy с обоими знаками dH. Вне допуска сохраняются прежние коды и диагностика поля. При совпавшем пересчёте VirtualBody передать записанное значение в существующий M4/M5. Сверка команд, событий, монотонного времени, типов и причинных readback сохраняется.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-cli --lib</Command><Command>cargo test --locked -p cvtl-cli --test m7_a1_replay</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Реплей одних архивов на двух ОС</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Взять неизменные записи RECORDING v1 из .local/GRACE-RECORDING-aa1d9f1/nominal-run, A1 v1 из .local/GRACE-A1-REPLAY/nominal-run, калибровку M8 из .local/GRACE-M8-ANALYSIS/calibration-final/run-01 и отдельный A1 LOOP со сменой scale из .local/GRACE-A1-LOOP/nominal-run. Скопировать один и тот же набор в локальную Ubuntu VM. До и после сверить SHA-256 всех файлов и состав каталогов. Тесты подмены используют собственные временные записи.</Criterion>
+          <Criterion>На macOS ARM64 и Ubuntu 22.04.5 ARM64 с Rust 1.94.1 прогнать cargo fmt, сборку, Clippy с -D warnings и все тесты. Оба отчёта v1 должны совпасть побайтно с прежними. Калибровка должна дать matched, 300 тепловых шагов, границу raw 14314 записей в 113 кадрах и off_verified. Отдельный архив со сменой scale должен дать matched, 30 тепловых шагов, off_verified и прежний отчёт macOS. Для калибровки выполнить analyze --start 8 --window 12 --seed 20261111. Сверить полный JSON обеих ОС с исходным отчётом macOS, включая оценку, выборки и интервал.</Criterion>
+          <Criterion>Зафиксировать команды, архитектуры, исходное расхождение, численные допуски, хэши, границы и результаты в отчёте и STATUS. В графе и verification обновить только M-CVTL-CLI и V-M-CVTL-CLI. Свежие baseline, target и final, отдельный APPLY после независимого ревью точного дерева с гейтом простоты. Бюджеты ceil(4 × максимум) + 1 с получены из трёх проверок чистой базы с максимумами 0,33 с для fmt и 10,53 с для workspace. Выполнение ограничено локальными файлами и эмуляторами.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo fmt --all -- --check</Command><Command>cargo build --workspace --locked</Command><Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command><Command>cargo test --workspace --locked</Command></Verification>
+      </T-002>
+    </ImplementationPlan>
+  </C-CVTL-M9-REPLAY-PORTABILITY>
+</GraceChangePlan>
