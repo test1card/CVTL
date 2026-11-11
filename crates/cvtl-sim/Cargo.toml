@@ -16,6 +16,7 @@ cvtl-store = { path = "../cvtl-store" }
 yaml_serde.workspace = true
 serde.workspace = true
 sha2 = "0.10"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dev-dependencies]
 cvtl-analysis = { path = "../cvtl-analysis" }

@@ -32,7 +32,8 @@ use cvtl_control::{
     ControlConfig, Controller, Demand, HeatPermit, Tick, TimedPowerSample,
 };
 use cvtl_core::units::{
-    Amperes, Kilograms, Ohms, PerSecond, Seconds, Volts, Watts, WattsPerKelvin, WattsPerSecond,
+    Amperes, Kelvin, Kilograms, Ohms, PerSecond, Seconds, Volts, Watts, WattsPerKelvin,
+    WattsPerSecond,
 };
 use cvtl_envelope::{ChannelSpec, Margins, ResistanceRange};
 use cvtl_instruments::{
@@ -55,13 +56,18 @@ use cvtl_store::{
 
 use crate::{
     a1::{A1Scenario, HeldTf, CONFIGURED_SCENARIO, SCENARIO},
+    head::SyntheticHead,
     keithley::KeithleySimulator,
     lakeshore::LakeShoreSim,
+    modes::{
+        self, compensation_emulation, control_demand, BodyEdit, BodyPort, Compensation, HeldPort,
+        ModeSetup, ModeSnapshot, VirtualBody,
+    },
 };
 
 pub use crate::a1::{A1Calibration, A1OtherHeat, A1PreviewPoint};
+pub use crate::modes::PERIOD;
 
-pub const PERIOD: Duration = Duration::from_millis(100);
 const COMMAND_LIMIT: Duration = Duration::from_millis(250);
 const CHANNELS: [Channel; 2] = [Channel::A, Channel::B];
 const RAW_CHANNELS: [raw::Channel; 2] = [raw::Channel::A, raw::Channel::B];
@@ -213,6 +219,79 @@ struct Frame {
     measured_started: Option<Instant>,
 }
 
+enum Scenario {
+    LegacyPower,
+    A1(Box<A1Scenario>),
+    Operator(Box<OperatorMode>),
+}
+
+struct OperatorMode {
+    setup: ModeSnapshot,
+    head: SyntheticHead,
+    body: Option<VirtualBody>,
+    compensation: Option<Compensation>,
+    pending_body_edit: Option<BodyEdit>,
+    start_ns: Option<u64>,
+    tracking_energy: bool,
+    failed: bool,
+}
+
+impl OperatorMode {
+    fn temperatures(&self) -> [Kelvin; 8] {
+        let temperature = self.head.temperatures();
+        let mut frame = [Kelvin::new(self.setup.head.initial_k[3]).unwrap(); 8];
+        frame[..3].copy_from_slice(&[temperature.stage1, temperature.stage2, temperature.tf]);
+        frame
+    }
+
+    fn tick_demand(
+        &mut self,
+        frame: &mut Frame,
+        step: Option<raw::ModeStepV1>,
+        running: bool,
+        max_age: Duration,
+        tf: Option<HeldPort>,
+    ) -> Result<(Demand, Option<HeldPort>), String> {
+        frame.input.mode_step_v1 = step;
+        let mut held = None;
+        let demand = if let Some(body) = &mut self.body {
+            let requested = if let Some(step) = &mut frame.input.mode_step_v1 {
+                let current = body
+                    .sample(&frame.input.temperatures, frame.input.measured_ns, max_age)
+                    .filter(|sample| sample.read_started_ns() >= step.interval_end_ns);
+                let body_step = step.body.as_mut().expect("virtual body interval");
+                body_step.compensation = self
+                    .compensation
+                    .as_mut()
+                    .map(|fixture| fixture.evaluate(tf, frame.input.measured_ns, max_age));
+                let (_, requested) = body.complete_tick(
+                    body_step,
+                    current,
+                    self.pending_body_edit.take(),
+                    compensation_emulation(body_step.compensation),
+                )?;
+                held = current;
+                requested
+            } else {
+                None
+            };
+            match requested.filter(|_| running) {
+                Some(requested_w) => raw::Demand::VirtualBody { requested_w },
+                None => raw::Demand::Observe,
+            }
+        } else {
+            self.setup.mode.ordinary_demand(
+                self.start_ns.filter(|_| running),
+                frame.input.measured_ns,
+                &frame.input.temperatures,
+            )?
+        };
+        let control = control_demand(demand)?;
+        frame.input.demand = demand;
+        Ok((control, held))
+    }
+}
+
 pub struct RecordingLoop<'a> {
     source: &'a KeithleySimulator,
     thermometer: &'a LakeShoreSim,
@@ -229,7 +308,7 @@ pub struct RecordingLoop<'a> {
     last_control: Option<Duration>,
     currents: [Amperes; 2],
     targets_w: [f64; 2],
-    a1: Option<A1Scenario>,
+    scenario: Scenario,
 }
 
 impl<'a> RecordingLoop<'a> {
@@ -267,7 +346,7 @@ impl<'a> RecordingLoop<'a> {
             lake: None,
             supervisor,
             max_temperature_age,
-            controller: controller(),
+            controller: controller(test_only_control_config()),
             journal,
             trace: Rc::new(RefCell::new(Trace::default())),
             epoch,
@@ -276,7 +355,7 @@ impl<'a> RecordingLoop<'a> {
             last_control: None,
             currents: [a(0.0); 2],
             targets_w: [0.0; 2],
-            a1: None,
+            scenario: Scenario::LegacyPower,
         }
     }
 
@@ -426,7 +505,69 @@ impl<'a> RecordingLoop<'a> {
             supervisor,
             max_temperature_age,
         );
-        owner.a1 = Some(a1);
+        owner.scenario = Scenario::A1(Box::new(a1));
+        Ok(owner)
+    }
+
+    pub fn new_operator_mode(
+        source: &'a KeithleySimulator,
+        thermometer: &'a LakeShoreSim,
+        run: &str,
+        path: PathBuf,
+        epoch: Instant,
+        setup: ModeSnapshot,
+    ) -> Result<Self, Error> {
+        setup.validate().map_err(Error::Scenario)?;
+        let body = matches!(setup.mode, ModeSetup::VirtualBody { .. })
+            .then(|| VirtualBody::new(&setup, modes::CATALOG.into()))
+            .transpose()
+            .map_err(Error::Scenario)?;
+        let compensation = Compensation::new(&setup, modes::CATALOG).map_err(Error::Scenario)?;
+        let head = setup.head.build().map_err(Error::Scenario)?;
+        let mut profile = ProtectionProfile::test_only_example();
+        profile.max_temperature_age = setup.mode.temperature_age();
+        let max_temperature_age = profile.max_temperature_age;
+        let mut snapshot = Self::snapshot_for(modes::PROFILE, modes::PROFILE, None, &profile);
+        let supervisor = Supervisor::new(profile)
+            .map_err(|_| Error::Scenario("Недопустимый профиль защит режима".into()))?;
+        let yaml =
+            yaml_serde::to_string(&setup).map_err(|error| Error::Scenario(error.to_string()))?;
+        snapshot.config_yaml.push_str("  modes:\n");
+        for line in yaml.lines() {
+            snapshot.config_yaml.push_str("    ");
+            snapshot.config_yaml.push_str(line);
+            snapshot.config_yaml.push('\n');
+        }
+        if body.is_some() {
+            snapshot
+                .references
+                .push(("nist_csv".into(), modes::CATALOG.as_bytes().to_vec()));
+        }
+        let mode = OperatorMode {
+            setup,
+            head,
+            body,
+            compensation,
+            pending_body_edit: None,
+            start_ns: None,
+            tracking_energy: false,
+            failed: false,
+        };
+        thermometer
+            .set_temperatures(mode.temperatures())
+            .map_err(InstrumentError::Io)?;
+        let journal = writer::spawn_file(run, 1, path, snapshot, move || epoch.elapsed())
+            .map_err(Error::Journal)?;
+        let mut owner = Self::with_supervisor(
+            source,
+            thermometer,
+            journal,
+            epoch,
+            supervisor,
+            max_temperature_age,
+        );
+        owner.controller = operator_controller(&mode.setup.mode);
+        owner.scenario = Scenario::Operator(Box::new(mode));
         Ok(owner)
     }
 
@@ -444,15 +585,33 @@ impl<'a> RecordingLoop<'a> {
         scale: Option<f64>,
         bridge: Option<WattsPerKelvin>,
     ) -> Result<(), Error> {
-        if self
-            .a1
-            .as_mut()
-            .is_some_and(|a1| a1.queue_change(mass, scale, bridge))
-        {
+        let accepted = match &mut self.scenario {
+            Scenario::A1(a1) => a1.queue_change(mass, scale, bridge),
+            _ => false,
+        };
+        if accepted {
             Ok(())
         } else {
             Err(InstrumentError::InvalidInput("Недопустимое или уже ожидающее изменение A1").into())
         }
+    }
+
+    pub fn change_operator_body(&mut self, edit: BodyEdit) -> Result<(), Error> {
+        let Scenario::Operator(mode) = &mut self.scenario else {
+            return Err(Error::Scenario("Режим виртуального тела не выбран".into()));
+        };
+        let body = mode
+            .body
+            .as_ref()
+            .ok_or_else(|| Error::Scenario("Режим виртуального тела не выбран".into()))?;
+        if !mode.tracking_energy || mode.failed || mode.pending_body_edit.is_some() {
+            return Err(Error::Scenario(
+                "Тепловой расчёт не запущен, остановлен или уже ожидает изменения".into(),
+            ));
+        }
+        body.validate_edit(&edit).map_err(Error::Scenario)?;
+        mode.pending_body_edit = Some(edit);
+        Ok(())
     }
 
     fn snapshot_for(
@@ -543,6 +702,7 @@ impl<'a> RecordingLoop<'a> {
     }
 
     pub fn recover(&mut self) -> Result<(), Error> {
+        self.clear_compensation();
         let status = self.journal.poll();
         if !status.ready && self.keithley.is_none() {
             return Err(Error::Journal(status.failure.unwrap_or(Failure::NotReady)));
@@ -588,14 +748,46 @@ impl<'a> RecordingLoop<'a> {
     }
 
     pub fn operate(&mut self, action: OperatorAction) -> Result<(), Error> {
+        let scheduled = Instant::now();
+        let heat_request = matches!(action, OperatorAction::Arm | OperatorAction::Start);
+        if let Scenario::Operator(mode) = &self.scenario {
+            if heat_request && matches!(mode.setup.mode, ModeSetup::Observe) {
+                return Err(
+                    InstrumentError::State("Наблюдение выполняется с выключенным выходом").into(),
+                );
+            }
+            if let Some(fixture) = &mode.compensation {
+                let state_allowed = match action {
+                    OperatorAction::Arm => self.state() == MachineState::OutputOffVerified,
+                    OperatorAction::Start => self.state() == MachineState::Armed,
+                    OperatorAction::Reset => {
+                        self.state() == MachineState::FaultLatched
+                            && self.output_state() == OutputState::OffVerified
+                    }
+                    OperatorAction::Stop => true,
+                };
+                if !state_allowed {
+                    return Err(MachineError::InvalidState.into());
+                }
+                if heat_request
+                    && !fixture.ready(ns(self.since_epoch(scheduled)), self.max_temperature_age)
+                {
+                    return Err(Error::Scenario("Нужны два свежих измерения tf".into()));
+                }
+            }
+        }
         let id = self.next_id();
         let correlation = Correlation::Request(id);
         if action == OperatorAction::Stop {
             return self.stop(correlation);
         }
+        if action == OperatorAction::Reset {
+            self.clear_compensation();
+        }
         self.require_journal(correlation)?;
-        let mut frame = self.acquire(Instant::now(), Duration::ZERO, false);
-        let held = if let Some(a1) = &self.a1 {
+        let mut frame = self.acquire(scheduled, Duration::ZERO, false);
+        let start_ns = frame.input.measured_ns;
+        let held = if let Scenario::A1(a1) = &self.scenario {
             let held = HeldTf::from_inputs(&frame.input, self.max_temperature_age);
             if a1.failed || (frame.monitor.thermometer_connected && held.is_none()) {
                 invalidate_model(&mut frame);
@@ -604,7 +796,58 @@ impl<'a> RecordingLoop<'a> {
         } else {
             None
         };
+        let mut operator_held = None;
+        if let Scenario::Operator(mode) = &self.scenario {
+            if mode.failed {
+                invalidate_model(&mut frame);
+            } else if let (OperatorAction::Start, Some(body)) = (action, &mode.body) {
+                operator_held = body.sample(
+                    &frame.input.temperatures,
+                    start_ns,
+                    self.max_temperature_age,
+                );
+                let temperature_stale = frame.monitor.temperatures.is_some_and(|temperatures| {
+                    frame
+                        .monitor
+                        .monotonic
+                        .saturating_sub(temperatures.measured_at)
+                        > self.max_temperature_age
+                });
+                if operator_held.is_none()
+                    && frame.monitor.thermometer_connected
+                    && !temperature_stale
+                {
+                    invalidate_model(&mut frame);
+                }
+            }
+        }
+        let mut tf = None;
+        let mut pair_unavailable = false;
+        if let (true, Scenario::Operator(mode)) = (heat_request, &mut self.scenario) {
+            if let Some(fixture) = &mut mode.compensation {
+                tf = Compensation::sample(
+                    &frame.input.temperatures,
+                    start_ns,
+                    self.max_temperature_age,
+                );
+                pair_unavailable = matches!(
+                    fixture.evaluate(tf, start_ns, self.max_temperature_age),
+                    raw::ModeCompensationV1::Unavailable { .. }
+                );
+            }
+        }
         let input = self.record_inputs(correlation, frame.input, &frame.monitor)?;
+        if pair_unavailable {
+            self.clear_compensation();
+            let decision = self
+                .supervisor
+                .observe(&frame.monitor, &mut self.journal.journal(correlation));
+            if let Some(Effect::DisableBoth(request)) = decision.effect {
+                self.apply_off(request, correlation)?;
+            }
+            self.require_no_safety_fault()?;
+            return Err(Error::Scenario("Пара измерений tf непригодна".into()));
+        }
         let decision = self.supervisor.operate(
             action,
             &frame.monitor,
@@ -613,7 +856,7 @@ impl<'a> RecordingLoop<'a> {
         match decision.effect {
             Some(Effect::DisableBoth(request)) => self.apply_off(request, correlation)?,
             Some(Effect::EnableBoth(request)) => {
-                if let Some(a1) = &mut self.a1 {
+                if let Scenario::A1(a1) = &mut self.scenario {
                     if a1.held.is_none() {
                         let started = held.is_some() && self.source.start_energy_tracking().is_ok();
                         if !started {
@@ -625,10 +868,27 @@ impl<'a> RecordingLoop<'a> {
                     }
                 }
                 self.enable(request, input, correlation)?;
+                if let Scenario::Operator(mode) = &mut self.scenario {
+                    if !mode.tracking_energy {
+                        if self.source.start_energy_tracking().is_err() {
+                            mode.failed = true;
+                            self.stop(correlation)?;
+                            return Err(Error::Safety(FaultReason::ModelFailure));
+                        }
+                        mode.tracking_energy = true;
+                        if let (Some(body), Some(held)) = (&mut mode.body, operator_held) {
+                            body.observe(held);
+                        }
+                    }
+                    mode.start_ns = Some(start_ns);
+                }
             }
             None => {}
         }
         self.require_no_safety_fault()?;
+        if heat_request {
+            self.accept_compensation(tf);
+        }
         if action == OperatorAction::Reset {
             self.controller.reset_fault();
             self.last_control = None;
@@ -648,8 +908,12 @@ impl<'a> RecordingLoop<'a> {
         let correlation = Correlation::Tick(id);
         self.require_journal(correlation)?;
         let step = self.advance_a1();
+        let mode_step = self.advance_operator_mode();
         let mut frame = self.acquire(scheduled, PERIOD, missed);
-        let demand = if let Some(a1) = &mut self.a1 {
+        let running = self.state() == MachineState::Running;
+        let mut operator_held = None;
+        let mut tf = None;
+        let demand = if let Scenario::A1(a1) = &mut self.scenario {
             let mut demand = Demand::Observe;
             if a1.failed {
                 invalidate_model(&mut frame);
@@ -672,6 +936,36 @@ impl<'a> RecordingLoop<'a> {
                 }
             }
             demand
+        } else if let Scenario::Operator(mode) = &mut self.scenario {
+            let calculation = if mode.failed {
+                None
+            } else {
+                if mode.compensation.is_some() {
+                    tf = Compensation::sample(
+                        &frame.input.temperatures,
+                        frame.input.measured_ns,
+                        self.max_temperature_age,
+                    )
+                    .filter(|sample| {
+                        mode_step
+                            .as_ref()
+                            .is_none_or(|step| sample.read_started_ns() >= step.interval_end_ns)
+                    });
+                }
+                mode.tick_demand(&mut frame, mode_step, running, self.max_temperature_age, tf)
+                    .ok()
+            };
+            match calculation {
+                Some((demand, held)) => {
+                    operator_held = held;
+                    demand
+                }
+                None => {
+                    mode.failed = true;
+                    invalidate_model(&mut frame);
+                    Demand::Observe
+                }
+            }
         } else {
             Demand::Power(w(DEMAND_W))
         };
@@ -680,6 +974,13 @@ impl<'a> RecordingLoop<'a> {
             .map_or(PERIOD, |previous| frame.monitor.monotonic - previous);
         frame.input.dt_ns = ns(dt);
         let input = self.record_inputs(correlation, frame.input, &frame.monitor)?;
+        if let (Scenario::Operator(mode), Some(held)) = (&mut self.scenario, operator_held) {
+            mode.body
+                .as_mut()
+                .expect("virtual body sample")
+                .observe(held);
+        }
+        self.accept_compensation(tf);
         let measured_w = frame.samples[0].zip(frame.samples[1]).map(|(a, b)| {
             a.sample.current.get() * a.sample.voltage.get()
                 + b.sample.current.get() * b.sample.voltage.get()
@@ -744,7 +1045,9 @@ impl<'a> RecordingLoop<'a> {
     }
 
     fn advance_a1(&mut self) -> Option<raw::A1StepV1> {
-        let a1 = self.a1.as_mut()?;
+        let Scenario::A1(a1) = &mut self.scenario else {
+            return None;
+        };
         if a1.failed || a1.held.is_none() {
             return None;
         }
@@ -759,6 +1062,54 @@ impl<'a> RecordingLoop<'a> {
                 Some(step)
             });
         a1.failed = step.is_none();
+        step
+    }
+
+    fn advance_operator_mode(&mut self) -> Option<raw::ModeStepV1> {
+        let Scenario::Operator(mode) = &mut self.scenario else {
+            return None;
+        };
+        if mode.failed || !mode.tracking_energy {
+            return None;
+        }
+        let step = self
+            .source
+            .take_energy_interval()
+            .ok()
+            .and_then(|interval| {
+                let interval_ns = ns(interval.duration);
+                let interval_end_ns = ns(interval.ended_at.checked_duration_since(self.epoch)?);
+                let dt = Seconds::new(interval.duration.as_secs_f64())?;
+                let heater_energy_j = interval.energy.map(|energy| energy.get());
+                let [a, b] = heater_energy_j.map(|joules| Watts::new(joules / dt.get()));
+                let heater = [a?, b?];
+                let cooling = mode.setup.head.removal_w.map(w);
+                if let Some(compensation) = &mut mode.compensation {
+                    compensation
+                        .advance_head(&mut mode.head, dt, heater, cooling)
+                        .ok()?;
+                } else {
+                    mode.head.advance(dt, heater, cooling).ok()?;
+                }
+                self.thermometer
+                    .set_temperatures(mode.temperatures())
+                    .ok()?;
+                let body = mode
+                    .body
+                    .as_mut()
+                    .map(|body| {
+                        body.advance(interval_ns, interval_end_ns, self.max_temperature_age)
+                    })
+                    .transpose()
+                    .ok()?;
+                Some(raw::ModeStepV1 {
+                    interval_ns,
+                    interval_end_ns,
+                    heater_energy_j,
+                    body,
+                })
+            });
+        mode.failed = step.is_none();
         step
     }
 
@@ -865,12 +1216,11 @@ impl<'a> RecordingLoop<'a> {
                 read_finished_ns: temperatures[index]
                     .map(|value| ns(self.since_epoch(value.finished))),
             }),
-            demand: if self.a1.is_some() {
-                raw::Demand::Observe
-            } else {
-                raw::Demand::Power {
+            demand: match self.scenario {
+                Scenario::LegacyPower => raw::Demand::Power {
                     requested_w: DEMAND_W,
-                }
+                },
+                _ => raw::Demand::Observe,
             },
             source_connected: monitor.source_connected,
             thermometer_connected: monitor.thermometer_connected,
@@ -882,8 +1232,9 @@ impl<'a> RecordingLoop<'a> {
             journal_ok: monitor.journal_ok,
             cooling_phase: "cooling",
             a1_step_v1: None,
+            mode_step_v1: None,
         };
-        if self.a1.is_some() && temperatures[2].is_some() {
+        if !matches!(self.scenario, Scenario::LegacyPower) && temperatures[2].is_some() {
             // The 218 reading starts with RDGST. A1 holds the later KRDG sample.
             input.temperatures[2].read_started_ns = self
                 .trace
@@ -900,6 +1251,16 @@ impl<'a> RecordingLoop<'a> {
                     } if command == "KRDG? 3" => Some(*at_ns),
                     _ => None,
                 });
+        }
+        if matches!(&self.scenario, Scenario::Operator(mode) if mode.compensation.is_some()
+            || matches!(mode.setup.mode, ModeSetup::VirtualBody { port: BodyPort::Tf, .. }))
+        {
+            if let (Some(pair), Some(tf)) = (
+                monitor.temperatures.as_mut(),
+                input.temperatures[2].read_started_ns,
+            ) {
+                pair.measured_at = pair.measured_at.min(Duration::from_nanos(tf));
+            }
         }
         Frame {
             monitor,
@@ -1044,10 +1405,10 @@ impl<'a> RecordingLoop<'a> {
                 self.record_transport(correlation)?;
             }
         }
-        if self.a1.is_some() {
-            self.controller = controller();
-        } else {
-            self.controller.reset_fault();
+        match &self.scenario {
+            Scenario::A1(_) => self.controller = controller(test_only_control_config()),
+            Scenario::Operator(mode) => self.controller = operator_controller(&mode.setup.mode),
+            Scenario::LegacyPower => self.controller.reset_fault(),
         }
         self.last_control = None;
         self.record_output(correlation)?;
@@ -1105,9 +1466,12 @@ impl<'a> RecordingLoop<'a> {
         Ok(())
     }
 
-    fn require_no_safety_fault(&self) -> Result<(), Error> {
-        self.fault_reason()
-            .map_or(Ok(()), |fault| Err(Error::Safety(fault)))
+    fn require_no_safety_fault(&mut self) -> Result<(), Error> {
+        if let Some(fault) = self.fault_reason() {
+            self.clear_compensation();
+            return Err(Error::Safety(fault));
+        }
+        Ok(())
     }
 
     fn journal_error(&mut self, correlation: Correlation, failure: Failure) -> Error {
@@ -1116,6 +1480,7 @@ impl<'a> RecordingLoop<'a> {
     }
 
     fn journal_off(&mut self, correlation: Correlation) {
+        self.clear_compensation();
         if let Some(Effect::DisableBoth(request)) = self.supervisor.journal_failed() {
             let _ = self.apply_off(request, correlation);
         }
@@ -1124,7 +1489,11 @@ impl<'a> RecordingLoop<'a> {
     fn source_failure(&mut self, correlation: Correlation) {
         // A failed transport has invalidated proof. A successful future readback
         // belongs to a fresh request after explicit recovery.
+        self.clear_compensation();
         self.supervisor.disconnect();
+        if let Scenario::Operator(mode) = &mut self.scenario {
+            mode.start_ns = None;
+        }
         if let Some(driver) = self.keithley.as_mut() {
             let _ = driver.disable_both(deadline());
         }
@@ -1172,6 +1541,7 @@ impl<'a> RecordingLoop<'a> {
 
     fn stop(&mut self, correlation: Correlation) -> Result<(), Error> {
         // No new measurements and no synchronous file operation in the OFF path.
+        self.clear_compensation();
         let frame = self.empty_monitor(self.epoch.elapsed());
         let effect = self.supervisor.operate(
             OperatorAction::Stop,
@@ -1215,6 +1585,10 @@ impl<'a> RecordingLoop<'a> {
     }
 
     fn finish_off(&mut self, request: RequestToken, verified: bool) -> Result<(), Error> {
+        self.clear_compensation();
+        if let Scenario::Operator(mode) = &mut self.scenario {
+            mode.start_ns = None;
+        }
         if verified {
             for branch in Branch::ALL {
                 self.supervisor
@@ -1226,6 +1600,28 @@ impl<'a> RecordingLoop<'a> {
             self.supervisor.proof_unavailable(request)?;
         }
         Ok(())
+    }
+
+    /// Non-compensating modes have no derivative readiness requirement.
+    pub fn compensation_ready(&self) -> bool {
+        match &self.scenario {
+            Scenario::Operator(mode) => mode.compensation.as_ref().is_none_or(|fixture| {
+                fixture.ready(ns(self.epoch.elapsed()), self.max_temperature_age)
+            }),
+            _ => true,
+        }
+    }
+
+    fn accept_compensation(&mut self, tf: Option<HeldPort>) {
+        if let Scenario::Operator(mode) = &mut self.scenario {
+            if let Some(fixture) = &mut mode.compensation {
+                fixture.accept(tf);
+            }
+        }
+    }
+
+    fn clear_compensation(&mut self) {
+        self.accept_compensation(None);
     }
 }
 
@@ -1317,11 +1713,17 @@ pub fn test_only_control_config() -> ControlConfig {
     }
 }
 
-fn controller() -> Controller {
+fn controller(config: ControlConfig) -> Controller {
     let rate = WattsPerSecond::new(SLEW_W_PER_S).unwrap();
     Controller::new(
-        test_only_control_config(),
+        config,
         Allocator::new(None, rate, rate, [rate; 2], [rate; 2]).unwrap(),
     )
     .unwrap()
+}
+
+fn operator_controller(mode: &ModeSetup) -> Controller {
+    let mut config = test_only_control_config();
+    config.temperature_hold = mode.hold_config();
+    controller(config)
 }

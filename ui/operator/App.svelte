@@ -3,6 +3,7 @@
   import Live from "./Live.svelte";
   import Review from "./Review.svelte";
   import Scenario from "./Scenario.svelte";
+  import { modeChoice, modeLabels, resultReasons } from "./types";
   import type { ArchiveReceipt, ArchiveReview, ChangePayload, DaemonState, Estimate, OutputState, Setup, Theme } from "./types";
 
   const pages = [
@@ -60,6 +61,7 @@
   const jobBusy = $derived(sendingJob || job !== null);
   const actionBusy = $derived(sending || action !== null);
   const active = $derived(run?.journal === "opening" || run?.journal === "recording");
+  const observing = $derived(run?.mode?.kind === "observe");
   const canPrepare = $derived(!!currentForecast && connection && !active && run?.journal !== "closing" && !actionBusy);
 
   $effect(() => {
@@ -90,7 +92,7 @@
       const kind = action.kind;
       action = null;
       if (received.ok) {
-        if (kind === "create") screen = "preflight";
+        if (kind === "create") screen = value.run?.mode?.kind === "observe" ? "live" : "preflight";
         if (kind === "start") screen = "live";
         notice = kind === "change" ? "Заявка принята. Ожидается запись такта" : null;
       } else {
@@ -103,9 +105,15 @@
       error = "Результат заявки уже сменился. Проверьте текущее состояние прогона";
     }
     if (waitingChangeSeq !== null) {
-      if ((value.run?.last_change?.seq ?? 0) > waitingChangeSeq) {
+      const modeChange = value.run?.last_mode_change;
+      if ((modeChange?.seq ?? value.run?.last_change?.seq ?? 0) > waitingChangeSeq) {
         waitingChangeSeq = null;
-        notice = "Параметры применены и записаны";
+        if (modeChange?.change.outcome.status === "rejected") {
+          notice = null;
+          error = resultReasons[modeChange.reason ?? "body_edit_invalid_at_tick"] ?? "Параметры отклонены на такте";
+        } else {
+          notice = "Параметры применены и записаны";
+        }
       } else if (!value.run || value.run.fault || value.run.journal !== "recording") {
         waitingChangeSeq = null;
       }
@@ -184,7 +192,7 @@
     error = null;
     notice = null;
     const revision = ++commandRevision;
-    const beforeChange = run?.last_change?.seq ?? 0;
+    const beforeChange = run?.last_mode_change?.seq ?? run?.last_change?.seq ?? 0;
     sending = true;
     try {
       const { id } = await request<{ id: number }>(path, body);
@@ -289,16 +297,27 @@
       <div class="grid-two">
         <section class="panel">
           <h2>Готовность контура</h2>
+          {#if run.mode}<p>{modeLabels[modeChoice(run.mode)]}</p>{/if}
           <ul class="checks">
             <li><span class:positive={run.source_ready}>{run.source_ready ? "✓ Готов" : "○ Ожидание"}</span> Keithley 2604B, эмулятор</li>
             <li><span class:positive={run.thermometer_ready}>{run.thermometer_ready ? "✓ Готов" : "○ Ожидание"}</span> Lake Shore 218, эмулятор</li>
             <li><span class:positive={run.writer_ready}>{run.writer_ready ? "✓ Готов" : "○ Ожидание"}</span> Первичный журнал</li>
             <li><span class:positive={run.observation_clear}>{run.observation_clear ? "✓ Штатно" : "⚠ Проверить"}</span> Наблюдение M5</li>
+            {#if run.compensation_ready !== undefined}
+              <li data-testid="compensation-ready" data-ready={run.compensation_ready}>
+                <span class:positive={run.compensation_ready}>{run.compensation_ready ? "✓ Готова" : "○ Ожидание"}</span>
+                Пара свежих измерений tf
+              </li>
+            {/if}
           </ul>
           {#if run.fault}<p class="warning" role="status">⚠ Авария контура</p>{/if}
           <div class="actions">
-            <button onclick={() => command("arm")} disabled={!connection || !run.ready || actionBusy}>Допустить</button>
-            <button onclick={() => ask("start")} disabled={!connection || run.state !== "armed" || actionBusy}>Пуск</button>
+            {#if observing}
+              <button onclick={() => choose("live")}>К наблюдениям</button>
+            {:else}
+              <button onclick={() => command("arm")} disabled={!connection || !run.ready || run.compensation_ready === false || actionBusy}>Допустить</button>
+              <button onclick={() => ask("start")} disabled={!connection || run.state !== "armed" || run.compensation_ready === false || actionBusy}>Пуск</button>
+            {/if}
             {#if run.state === "fault_latched" && active}
               <button class="secondary" onclick={() => command("recover")} disabled={!connection || actionBusy}>Восстановить связь</button>
               <button class="secondary" onclick={() => ask("reset")} disabled={!connection || run.output_state !== "off_verified" || actionBusy}>Сбросить аварию</button>
@@ -328,8 +347,10 @@
     {/if}
   {:else if screen === "live"}
     {#if run}
-      <Live {run} busy={!connection || actionBusy || waitingChangeSeq !== null || !active}
-        onapply={(change) => command("change", change)} {theme} />
+      {#key run.id}
+        <Live {run} busy={!connection || actionBusy || waitingChangeSeq !== null || !active}
+          onapply={(change) => command("change", change)} {theme} />
+      {/key}
     {:else}
       <h1>Ход опыта</h1>
       <p class="panel">После подготовки здесь появятся наблюдения контура.</p>

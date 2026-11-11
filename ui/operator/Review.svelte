@@ -1,5 +1,6 @@
 <script lang="ts">
   import Plot from "./Plot.svelte";
+  import { modeLabels, resultReasons } from "./types";
   import type { AnalysisEstimate, ArchiveReceipt, ArchiveReview, PlotSeries, Theme } from "./types";
 
   interface Props {
@@ -48,7 +49,9 @@
 
   function temperatures(data: ArchiveReview): PlotSeries[] {
     return [
-      { label: "Тело", color: "#0072b2", values: data.samples.map((sample) => sample.body_k) },
+      ...(data.samples.some((sample) => sample.body_k !== null)
+        ? [{ label: "Тело", color: "#0072b2", values: data.samples.map((sample) => sample.body_k) }]
+        : []),
       { label: "Ступень 1", color: "#d55e00", values: data.samples.map((sample) => sample.temperatures_k[0]), dash: [6, 3] },
       { label: "Ступень 2", color: "#009e73", values: data.samples.map((sample) => sample.temperatures_k[1]), dash: [2, 3] },
       { label: "Насадка tf", color: "#b25293", values: data.samples.map((sample) => sample.temperatures_k[2]), dash: [8, 3, 2, 3] },
@@ -66,7 +69,9 @@
 
   function flow(data: ArchiveReview): PlotSeries[] {
     return [
-      { label: "Поток моста", color: "#0072b2", values: data.samples.map((sample) => sample.bridge_flow_w) },
+      ...(data.samples.some((sample) => sample.bridge_flow_w !== null)
+        ? [{ label: "Поток моста", color: "#0072b2", values: data.samples.map((sample) => sample.bridge_flow_w) }]
+        : []),
       { label: "Ошибка слежения", color: "#d55e00", values: data.samples.map((sample) => sample.tracking_error_w), dash: [6, 3] },
     ];
   }
@@ -173,10 +178,25 @@
   {@const report = data.report}
   {@const firstSample = data.samples[0]}
   {@const lastSample = data.samples.at(-1)}
+  {@const lastBody = data.samples.findLast((sample) => sample.mode_v1?.port != null)?.mode_v1}
+  {@const lastAge = data.samples.findLast((sample) => sample.mode_v1?.held_age_ns != null)?.mode_v1?.held_age_ns}
+  {@const compensation = data.samples.findLast((sample) => sample.mode_v1?.compensation != null)?.mode_v1?.compensation}
   {@const time = data.samples.map((sample) => sample.measured_ns / 1e9)}
   <section class="panel replay-record" data-testid={testid} aria-label={heading}>
     <h3>{heading}</h3>
     <p class="muted run-id">{report.run}</p>
+    {#if report.mode}<p>{modeLabels[report.fixture_compensation ? "compensation" : report.mode]}</p>{/if}
+    {#if lastSample?.mode_v1?.hold_setpoint_k != null}
+      <p>Уставка stage2 {quantity.format(lastSample.mode_v1.hold_setpoint_k)} К</p>
+    {/if}
+    {#if lastBody?.port}
+      <p>Порт {lastBody.port}{lastAge == null ? "" : ` · возраст ${quantity.format(lastAge / 1e6)} мс`}</p>
+    {/if}
+    {#if compensation?.status === "ready"}
+      <p>dTf/dt {quantity.format(compensation.d_tf_k_per_s)} К/с · Cf {quantity.format(compensation.fixture_capacity_j_per_k)} Дж/К · Q<sub>par,f</sub> {quantity.format(compensation.fixture_parasitic_w)} Вт</p>
+    {:else if compensation?.status === "unavailable"}
+      <p>{resultReasons[`compensation_${compensation.reason}`]}</p>
+    {/if}
     <dl class="review-metrics">
       <div>
         <dt>Реплей</dt>

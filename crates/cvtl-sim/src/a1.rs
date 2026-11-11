@@ -33,18 +33,18 @@ use crate::{
 
 pub(super) const SCENARIO: &str = "test_only_a1_loop_v1";
 pub(super) const CONFIGURED_SCENARIO: &str = "test_only_a1_loop_v2";
-const CATALOG: &str = include_str!("../../../data/materials/nist.csv");
+pub const CATALOG: &str = include_str!("../../../data/materials/nist.csv");
 const MATERIAL: &str = "ofhc_rrr100";
 const MASS_KG: f64 = 20.0;
 const BODY_K: f64 = 30.0;
 const INITIAL_SCALE: f64 = 0.1;
 const INITIAL_G: f64 = 0.02;
-const HEAD_K: [f64; 3] = [45.0, 15.0, 16.0];
-const JACKET_K: f64 = 77.0;
-const CAPACITY_J_PER_K: [f64; 3] = [10.0, 20.0, 5.0];
-const HEAD_LINKS_W_PER_K: [f64; 2] = [0.05, 0.5];
+pub(super) const HEAD_K: [f64; 3] = [45.0, 15.0, 16.0];
+pub(super) const JACKET_K: f64 = 77.0;
+pub(super) const CAPACITY_J_PER_K: [f64; 3] = [10.0, 20.0, 5.0];
+pub(super) const HEAD_LINKS_W_PER_K: [f64; 2] = [0.05, 0.5];
 const PREVIEW_STEPS: u32 = 30;
-const DEFAULT_REMOVAL_W: [f64; 2] = [2.0, 4.0];
+pub(super) const DEFAULT_REMOVAL_W: [f64; 2] = [2.0, 4.0];
 
 /// An explicitly selected synthetic calibration scenario.
 pub struct A1Calibration {
@@ -433,7 +433,11 @@ impl A1Scenario {
     }
 }
 
-fn held_age(read_started_ns: u64, interval_end_ns: u64, max_age: Duration) -> Option<Duration> {
+pub(super) fn held_age(
+    read_started_ns: u64,
+    interval_end_ns: u64,
+    max_age: Duration,
+) -> Option<Duration> {
     let age = Duration::from_nanos(interval_end_ns.checked_sub(read_started_ns)?);
     (age <= max_age).then_some(age)
 }

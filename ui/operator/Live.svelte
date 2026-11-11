@@ -1,6 +1,8 @@
 <script lang="ts">
   import Plot from "./Plot.svelte";
-  import type { ChangePayload, PlotSeries, RunView, Theme } from "./types";
+  import { bodyMaterials, bridgeFields } from "./Scenario.svelte";
+  import { bridgeLabels, modeChoice, modeLabels, resultReasons } from "./types";
+  import type { BridgeSetup, ChangePayload, PlotSeries, RunView, Theme } from "./types";
 
   let { run, busy, onapply, theme }: {
     run: RunView;
@@ -71,35 +73,61 @@
   let newMass = $state<number | undefined>(undefined);
   let newScale = $state<number | undefined>(undefined);
   let newG = $state<number | undefined>(undefined);
+  let newMaterial = $state("");
+  let newBridge = $state<BridgeSetup | null>(null);
 
   const latest = $derived(run.samples.at(-1));
+  const mode = $derived(modeChoice(run.mode));
+  const hasBody = $derived(!!run.parameters);
+  const port = $derived(run.mode?.kind === "virtual_body" ? run.mode.port ?? "tf" : "tf");
+  const compensation = $derived(latest?.mode_v1?.compensation);
+  const modeChange = $derived(run.last_mode_change);
+  const appliedChangeSeq = $derived(modeChange?.change.outcome.status === "applied" ? modeChange.seq : null);
   const measuredTotal = $derived(latest ? sum(latest.measured_w) : null);
   const flow = $derived(latest?.bridge_flow_w ?? null);
-  const flowDirection = $derived(flow === null ? "Поток недоступен" : flow > 0 ? "Тело → tf" : flow < 0 ? "tf → тело" : "Нулевой поток");
+  const flowDirection = $derived(flow === null ? "Поток недоступен" : flow > 0 ? `Тело → ${port}` : flow < 0 ? `${port} → тело` : "Нулевой поток");
   const outputText = $derived(run.output_state === "on_verified" ? "ON подтверждён" :
     run.output_state === "off_verified" ? "OFF подтверждён" : "Выход не подтверждён");
   const outputIcon = $derived(run.output_state === "unknown" ? "△" : "✓");
-  const radius = $derived(Math.min(62, Math.max(30, 34 + 4 * Math.sqrt(run.parameters.mass_kg))));
-  const bodyEdge = $derived(narrow
-    ? [coordinates.body[0], coordinates.body[1] + radius]
-    : [coordinates.body[0] + radius, coordinates.body[1]]);
-  const tfEdge = $derived(narrow
-    ? [coordinates.tf[0], coordinates.tf[1] - 25]
-    : [coordinates.tf[0] - 53, coordinates.tf[1]]);
+  const radius = $derived(Math.min(62, Math.max(30, 34 + 4 * Math.sqrt(run.parameters?.mass_kg ?? 0))));
+  const bridgePoints = $derived.by(() => {
+    const { body, tf, stage2 } = coordinates;
+    const points = port === "tf" ? (narrow
+      ? [[body[0], body[1] + radius], [tf[0], tf[1] - 25]]
+      : [[body[0] + radius, body[1]], [tf[0] - 53, tf[1]]]) : (narrow
+      ? [[body[0] - radius, body[1]], [19, body[1]], [19, stage2[1]], [stage2[0] - 53, stage2[1]]]
+      : [[body[0] + radius, body[1]], [245, 36], [455, 36], [stage2[0] - 53, stage2[1]]]);
+    if (flow !== null && flow < 0) points.reverse();
+    return points.map((point) => point.join(",")).join(" ");
+  });
   const bridgeStroke = $derived(flow === null ? 2 : Math.min(10, 2 + Math.abs(flow) * 2));
   const bodyShade = $derived(latest?.body_k == null ? "var(--surface-muted, #eef3f7)" :
-    latest.body_k > (latest.temperatures_k[2] ?? latest.body_k)
+    latest.body_k > (latest.temperatures_k[port === "stage2" ? 1 : 2] ?? latest.body_k)
       ? "color-mix(in srgb, #db9f44 22%, var(--surface, #fff))"
       : "color-mix(in srgb, #4599c8 24%, var(--surface, #fff))");
 
-  const editable = $derived(run.state === "running" && run.output_state === "on_verified" && run.journal === "recording");
-  const supportsG = $derived(run.parameters.g_w_per_k !== null);
+  const editable = $derived(hasBody && run.state === "running" && run.output_state === "on_verified" && run.journal === "recording");
+  const supportsG = $derived(mode === "a1" && run.parameters?.g_w_per_k != null);
   const validChange = $derived(
-    (newMass !== undefined || newScale !== undefined || (supportsG && newG !== undefined)) &&
+    (newMass !== undefined || newScale !== undefined || (supportsG && newG !== undefined) || newMaterial !== "" || newBridge !== null) &&
     (newMass === undefined || (Number.isFinite(newMass) && newMass > 0)) &&
     (newScale === undefined || (Number.isFinite(newScale) && newScale > 0 && newScale <= 1)) &&
     (!supportsG || newG === undefined || (Number.isFinite(newG) && newG >= 0))
   );
+
+  $effect(() => {
+    if (appliedChangeSeq !== null) {
+      newMass = undefined;
+      newScale = undefined;
+      newMaterial = "";
+      newBridge = null;
+    }
+  });
+
+  function toggleBridge(checked: boolean) {
+    const current = run.parameters?.bridge;
+    newBridge = checked && current ? structuredClone($state.snapshot(current)) : null;
+  }
 
   function apply(event: SubmitEvent) {
     event.preventDefault();
@@ -108,6 +136,8 @@
     if (newMass !== undefined) change.mass_kg = newMass;
     if (newScale !== undefined) change.scale = newScale;
     if (supportsG && newG !== undefined) change.g_w_per_k = newG;
+    if (newMaterial) change.material = newMaterial;
+    if (newBridge) change.bridge = newBridge;
     onapply(change);
   }
 
@@ -117,6 +147,7 @@
     latest?.slew_limited ? "по скорости изменения" : null,
   ].filter((item) => item !== null));
   const fault = $derived(run.fault ? eventLabels[run.fault] ?? run.fault : null);
+  const offReason = $derived(run.off_reason ? resultReasons[run.off_reason] ?? eventLabels[run.off_reason] ?? run.off_reason : null);
 
   const palette = $derived(theme === "dark"
     ? ["#56b4e9", "#e6ad50", "#5ec6a9", "#e894c6"]
@@ -130,7 +161,7 @@
     line("stage1", 0, run.samples.map((row) => row.temperatures_k[0])),
     line("stage2", 1, run.samples.map((row) => row.temperatures_k[1])),
     line("tf", 2, run.samples.map((row) => row.temperatures_k[2])),
-    line("Виртуальное тело", 3, run.samples.map((row) => row.body_k)),
+    ...(hasBody ? [line("Виртуальное тело", 3, run.samples.map((row) => row.body_k))] : []),
   ]);
   const inversion = $derived([
     line("stage2 − stage1", 0, run.samples.map((row) => row.inversion_delta_k)),
@@ -150,7 +181,7 @@
     line("B цель", 3, run.samples.map((row) => row.targets_w?.[1] ?? null)),
   ]);
   const bridgeAndError = $derived([
-    line("Знаковый поток моста", 0, run.samples.map((row) => row.bridge_flow_w)),
+    ...(hasBody ? [line("Знаковый поток моста", 0, run.samples.map((row) => row.bridge_flow_w))] : []),
     line("Измерено − запрос", 1, run.samples.map((row) => row.tracking_error_w)),
   ]);
 </script>
@@ -166,8 +197,9 @@
         <span aria-hidden="true">{outputIcon}</span> {outputText}
       </span>
     </figcaption>
-    <svg data-testid="live-svg" role="img" aria-label="Виртуальное тело, мост, головка и нагреватели"
-      viewBox={coordinates.viewBox} class="thermal-scheme">
+    {#if run.mode}<p>{modeLabels[mode]}</p>{/if}
+    <svg data-testid="live-svg" role="img" aria-label={hasBody ? "Виртуальное тело, мост, головка и нагреватели" : "Головка и нагреватели"}
+      viewBox={hasBody ? coordinates.viewBox : narrow ? "0 152 350 267" : "275 0 505 248"} class="thermal-scheme">
       <title>Тепловая схема текущего прогона</title>
       <defs>
         <marker id="live-flow-arrow" viewBox="0 0 10 10" refX="9" refY="5"
@@ -182,21 +214,20 @@
       {#each [coordinates.branchA, coordinates.branchB] as branch}
         <line class="heater-link" x1={branch[0]} y1={branch[1]} x2={coordinates.tf[0]} y2={coordinates.tf[1]} />
       {/each}
-      <line class="bridge-link" x1={flow !== null && flow < 0 ? tfEdge[0] : bodyEdge[0]}
-        y1={flow !== null && flow < 0 ? tfEdge[1] : bodyEdge[1]}
-        x2={flow !== null && flow < 0 ? bodyEdge[0] : tfEdge[0]}
-        y2={flow !== null && flow < 0 ? bodyEdge[1] : tfEdge[1]}
-        stroke-width={bridgeStroke} stroke-dasharray={flow === null ? "5 5" : undefined}
-        marker-end={flow !== null && flow !== 0 ? "url(#live-flow-arrow)" : undefined} />
-      <circle cx={coordinates.body[0]} cy={coordinates.body[1]} r={radius}
-        fill={bodyShade} class="body-node" />
-      <text x={coordinates.body[0]} y={coordinates.body[1] - 5} class="node-label">Тело</text>
-      <text x={coordinates.body[0]} y={coordinates.body[1] + 17} class="node-value">
-        {format(latest?.body_k, "К")}
-      </text>
-      <text x={coordinates.body[0]} y={coordinates.body[1] + 35} class="detail-label">
-        {format(run.parameters.mass_kg, "кг")}
-      </text>
+      {#if hasBody}
+        <polyline class="bridge-link" points={bridgePoints} fill="none"
+          stroke-width={bridgeStroke} stroke-dasharray={flow === null ? "5 5" : undefined}
+          marker-end={flow !== null && flow !== 0 ? "url(#live-flow-arrow)" : undefined} />
+        <circle cx={coordinates.body[0]} cy={coordinates.body[1]} r={radius}
+          fill={bodyShade} class="body-node" />
+        <text x={coordinates.body[0]} y={coordinates.body[1] - 5} class="node-label">Тело</text>
+        <text x={coordinates.body[0]} y={coordinates.body[1] + 17} class="node-value">
+          {format(latest?.body_k, "К")}
+        </text>
+        <text x={coordinates.body[0]} y={coordinates.body[1] + 35} class="detail-label">
+          {format(run.parameters?.mass_kg, "кг")}
+        </text>
+      {/if}
 
       {#each [
         {name: "tf", pos: coordinates.tf, temperature: latest?.temperatures_k[2]},
@@ -215,25 +246,41 @@
         <text x={branch.pos[0]} y={branch.pos[1] + 14} class="detail-label">{format(latest?.measured_w[index], "Вт")}</text>
       {/each}
     </svg>
-    <p class="scheme-caption">
-      <strong>{flowDirection}</strong>
-      {#if flow !== null}<span>{format(flow, "Вт")}</span>{/if}
-    </p>
+    {#if hasBody}
+      <p class="scheme-caption">
+        <strong>{flowDirection}</strong>
+        {#if flow !== null}<span>{format(flow, "Вт")}</span>{/if}
+        {#if run.mode?.kind === "virtual_body"}
+          <span class="muted">Порт {port}{latest?.mode_v1?.held_age_ns == null ? "" : ` · возраст ${format(latest.mode_v1.held_age_ns / 1e6, "мс")}`}</span>
+        {/if}
+      </p>
+    {/if}
   </figure>
 
   <section class="panel power-panel">
     <h2>Мощность</h2>
-    <dl class="power-summary">
-      <div><dt>Запрос</dt><dd>{format(latest?.requested_w, "Вт")}</dd></div>
-      <div><dt>После ограничений</dt><dd>{format(latest?.limited_w, "Вт")}</dd></div>
-      <div><dt>Измерено</dt><dd>{format(measuredTotal, "Вт")}</dd></div>
+    <dl class="power-summary" class:with-flow={hasBody && !!run.mode}>
+      {#if hasBody && run.mode}<div><dt>Поток моста q<sub>v</sub></dt><dd>{format(flow, "Вт")}</dd></div>{/if}
+      <div><dt>Запрос P<sub>req</sub></dt><dd>{format(latest?.requested_w, "Вт")}</dd></div>
+      <div><dt>После ограничений P<sub>limited</sub></dt><dd>{format(latest?.limited_w, "Вт")}</dd></div>
+      <div><dt>Измерено P<sub>actual</sub></dt><dd>{format(measuredTotal, "Вт")}</dd></div>
     </dl>
+    {#if run.mode?.kind === "temperature_hold"}<p>Уставка stage2 {format(run.mode.setpoint_k, "К")}</p>{/if}
+    {#if compensation?.status === "ready"}
+      <p class="muted">dTf/dt {format(compensation.d_tf_k_per_s, "К/с")} · Cf {format(compensation.fixture_capacity_j_per_k, "Дж/К")} · Q<sub>par,f</sub> {format(compensation.fixture_parasitic_w, "Вт")}</p>
+    {:else if run.compensation_ready !== undefined && !run.compensation_ready}
+      <p class="muted">{compensation?.status === "unavailable" ? resultReasons[`compensation_${compensation.reason}`] : "Ожидается пара свежих измерений tf"}</p>
+    {/if}
     <p class="limit-reason">
       {#if fault}<strong class="fault" role="status">△ {fault}</strong>
       {:else if reasons.length}<strong>Ограничение {reasons.join(", ")}</strong>
+      {:else if latest?.equivalence === "limited"}<strong>Эквивалентность ограничена</strong>
       {:else if latest?.requested_w != null}<span class="muted">Ограничений нет</span>
       {:else}<span class="muted">Запрос мощности отсутствует</span>{/if}
     </p>
+    {#if offReason && run.output_state !== "on_verified"}
+      <p data-testid="off-reason">Причина остановки <strong>{offReason}</strong></p>
+    {/if}
     <div class="table-wrap">
       <table class="branch-table">
         <thead>
@@ -253,40 +300,71 @@
     </div>
   </section>
 
-  <section class="panel parameter-panel">
-    <h2>Параметры тела и моста</h2>
-    <dl class="parameter-values">
-      <div><dt>Масса</dt><dd>{format(run.parameters.mass_kg, "кг")}</dd></div>
-      <div><dt>scale</dt><dd>{format(run.parameters.scale)}</dd></div>
-      <div><dt>G</dt><dd>{supportsG ? format(run.parameters.g_w_per_k, "Вт/К") : "Мост с переменной проводимостью"}</dd></div>
-    </dl>
-    <form onsubmit={apply}>
-      <div class="form-grid">
-        <label class="field">
-          Новая масса, кг
-          <input type="number" min="0" step="any" bind:value={newMass} disabled={!editable || busy} />
-        </label>
-        <label class="field">
-          Новый scale
-          <input type="number" min="0" max="1" step="any" bind:value={newScale} disabled={!editable || busy} />
-        </label>
-        <label class="field">
-          Новый G, Вт/К
-          <input type="number" min="0" step="any" bind:value={newG} disabled={!editable || busy || !supportsG} />
-        </label>
-      </div>
-      <div class="actions">
-        <button type="submit" disabled={!editable || busy || !validChange}>Применить параметры</button>
-        <p data-testid="applied-change" data-seq={run.last_change?.seq} aria-live="polite">
-          {#if run.last_change}
-            Применено на такте {run.last_change.tick}, запись №{run.last_change.seq}
+  {#if run.parameters}
+    <section class="panel parameter-panel" aria-label="Параметры тела и моста">
+      <h2>Параметры тела и моста</h2>
+      <dl class="parameter-values">
+        {#if run.parameters.material}
+          <div><dt>Материал</dt><dd>{bodyMaterials.find(([id]) => id === run.parameters?.material)?.[1] ?? run.parameters.material}</dd></div>
+        {/if}
+        <div><dt>Масса</dt><dd>{format(run.parameters.mass_kg, "кг")}</dd></div>
+        <div><dt>scale</dt><dd>{format(run.parameters.scale)}</dd></div>
+        {#if run.parameters.bridge}
+          <div><dt>Мост</dt><dd>{bridgeLabels[run.parameters.bridge.kind]}</dd></div>
+        {/if}
+        {#if run.parameters.g_w_per_k != null}
+          <div><dt>G</dt><dd>{format(run.parameters.g_w_per_k, "Вт/К")}</dd></div>
+        {:else if mode === "a1"}
+          <div><dt>Мост</dt><dd>Переменная проводимость</dd></div>
+        {/if}
+      </dl>
+      <form onsubmit={apply}>
+        <div class="form-grid">
+          <label class="field">
+            Новая масса, кг
+            <input type="number" min="0" step="any" bind:value={newMass} disabled={!editable || busy} />
+          </label>
+          <label class="field">
+            Новый scale
+            <input type="number" min="0" max="1" step="any" bind:value={newScale} disabled={!editable || busy} />
+          </label>
+          {#if mode === "a1"}
+            <label class="field">
+              Новый G, Вт/К
+              <input type="number" min="0" step="any" bind:value={newG} disabled={!editable || busy || !supportsG} />
+            </label>
           {:else}
-            Журнал пока не подтверждал смену параметров
+            <label class="field">
+              Новый материал
+              <select bind:value={newMaterial} disabled={!editable || busy}>
+                <option value="">Оставить текущий</option>
+                {#each bodyMaterials as [id, name] (id)}<option value={id}>{name}</option>{/each}
+              </select>
+            </label>
+            <label>
+              <input type="checkbox" checked={newBridge !== null} disabled={!editable || busy}
+                onchange={(event) => toggleBridge(event.currentTarget.checked)} /> Изменить мост
+            </label>
           {/if}
-        </p>
-      </div>
-    </form>
-  </section>
+        </div>
+        {#if newBridge}{@render bridgeFields(newBridge, (bridge) => newBridge = bridge, !editable || busy)}{/if}
+        <div class="actions">
+          <button type="submit" disabled={!editable || busy || !validChange}>Применить параметры</button>
+          <p data-testid={modeChange?.change.outcome.status === "rejected" ? "rejected-change" : "applied-change"}
+            data-seq={modeChange?.seq ?? run.last_change?.seq} aria-live="polite">
+            {#if modeChange}
+              {modeChange.change.outcome.status === "applied" ? "Применено" : "Отклонено"} на такте {modeChange.tick}, запись №{modeChange.seq}
+              {#if modeChange.reason}<span> · {resultReasons[modeChange.reason] ?? modeChange.reason}</span>{/if}
+            {:else if run.last_change}
+              Применено на такте {run.last_change.tick}, запись №{run.last_change.seq}
+            {:else}
+              Журнал пока не подтверждал смену параметров
+            {/if}
+          </p>
+        </div>
+      </form>
+    </section>
+  {/if}
 
   <section class="live-plots" aria-label="Графики прогона">
     <header class="plot-heading">
@@ -300,7 +378,7 @@
     <Plot {time} series={totalPower} units="Вт" label="Суммарная мощность" {theme} />
     <Plot {time} series={branchPower} units="Вт" label="Мощность по ветвям" {theme} />
     <div class="wide-plot">
-      <Plot {time} series={bridgeAndError} units="Вт" label="Поток по мосту и ошибка" {theme} />
+      <Plot {time} series={bridgeAndError} units="Вт" label={hasBody ? "Поток по мосту и ошибка" : "Ошибка слежения"} {theme} />
     </div>
   </section>
 
@@ -312,7 +390,7 @@
           <thead><tr><th scope="col">Запись</th><th scope="col">Время, с</th><th scope="col">Событие</th></tr></thead>
           <tbody>
             {#each [...run.events].reverse() as event (event.seq)}
-              <tr><td>№{event.seq}</td><td>{clock.format(event.at_ns / 1e9)}</td><td>{eventLabels[event.code] ?? event.code}</td></tr>
+              <tr><td>№{event.seq}</td><td>{clock.format(event.at_ns / 1e9)}</td><td>{eventLabels[event.code] ?? resultReasons[event.code] ?? event.code}</td></tr>
             {/each}
           </tbody>
         </table>
@@ -355,6 +433,7 @@
   .scheme-caption {
     display: flex;
     justify-content: center;
+    flex-wrap: wrap;
     gap: .6rem;
     margin: .2rem 0 0;
     color: var(--muted, #516776);
@@ -374,6 +453,7 @@
     border-radius: .6rem;
     background: var(--surface-muted, #eef3f7);
   }
+  .power-summary.with-flow { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   dt { font-size: .8rem; color: var(--muted, #516776); }
   dd { margin: .2rem 0 0; font-variant-numeric: tabular-nums; font-weight: 700; }
   .power-summary dd { font-size: clamp(1rem, 2.5vw, 1.55rem); }
@@ -388,6 +468,7 @@
   @media (max-width: 850px) { .live-plots { grid-template-columns: minmax(0, 1fr); } }
   @media (max-width: 500px) {
     .power-summary { gap: .35rem; }
+    .power-summary.with-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .power-summary div { padding: .45rem; }
     .power-summary dt { font-size: .72rem; }
     .parameter-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }

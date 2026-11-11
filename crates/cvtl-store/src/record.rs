@@ -12,6 +12,7 @@
 //   Record - versioned raw envelope
 //   Event - typed raw payload
 //   A1StepV1 - optional thermal step evidence for the A1 scenario
+//   ModeStepV1 - completed thermal interval for operator modes
 //   encode_line - serialize one bounded line
 //   decode_line - validate a complete line
 //   Snapshot - applied configuration and reference bytes
@@ -126,6 +127,147 @@ pub struct Inputs<'a> {
     pub cooling_phase: &'a str,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a1_step_v1: Option<A1StepV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_step_v1: Option<ModeStepV1>,
+}
+
+/// A completed thermal interval with measured heater energy for both branches.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ModeStepV1 {
+    pub interval_ns: u64,
+    pub interval_end_ns: u64,
+    pub heater_energy_j: [f64; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<ModeBodyStepV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ModeBodyStepV1 {
+    pub port: ThermalPoint,
+    pub held_k: f64,
+    pub held_read_started_ns: u64,
+    pub held_age_ns: u64,
+    pub temperature_k: f64,
+    pub q_v_w: Option<f64>,
+    pub change: Option<ModeBodyChangeV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compensation: Option<ModeCompensationV1>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModeCompensationV1 {
+    Ready {
+        previous_tf_k: f64,
+        previous_read_started_ns: u64,
+        current_tf_k: f64,
+        current_read_started_ns: u64,
+        d_tf_k_per_s: f64,
+        fixture_capacity_j_per_k: f64,
+        fixture_parasitic_w: f64,
+    },
+    Unavailable {
+        reason: ModeCompensationIssue,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModeCompensationIssue {
+    MissingTf,
+    PairNotReady,
+    FixtureInvalid,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ModeBodyChangeV1 {
+    pub request: serde_json::Value,
+    pub outcome: ModeChangeOutcomeV1,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModeChangeOutcomeV1 {
+    Applied {
+        temperature_before_k: f64,
+        temperature_after_k: f64,
+        dh_event_j: Option<f64>,
+    },
+    Rejected,
+}
+
+impl ModeStepV1 {
+    fn valid(&self, measured_ns: u64) -> bool {
+        self.interval_ns > 0
+            && self.interval_end_ns.checked_sub(self.interval_ns).is_some()
+            && self.interval_end_ns <= measured_ns
+            && self.heater_energy_j.into_iter().all(nonnegative)
+            && self
+                .body
+                .as_ref()
+                .is_none_or(|body| body.valid(self.interval_end_ns, measured_ns))
+    }
+}
+
+impl ModeBodyStepV1 {
+    fn valid(&self, interval_end_ns: u64, measured_ns: u64) -> bool {
+        matches!(self.port, ThermalPoint::Stage2 | ThermalPoint::Tf)
+            && interval_end_ns.checked_sub(self.held_read_started_ns) == Some(self.held_age_ns)
+            && positive(self.held_k)
+            && positive(self.temperature_k)
+            && self.q_v_w.is_none_or(f64::is_finite)
+            && self.change.as_ref().is_none_or(ModeBodyChangeV1::valid)
+            && self
+                .compensation
+                .is_none_or(|compensation| compensation.valid(measured_ns))
+    }
+}
+
+impl ModeCompensationV1 {
+    fn valid(self, measured_ns: u64) -> bool {
+        match self {
+            Self::Ready {
+                previous_tf_k,
+                previous_read_started_ns,
+                current_tf_k,
+                current_read_started_ns,
+                d_tf_k_per_s,
+                fixture_capacity_j_per_k,
+                fixture_parasitic_w,
+            } => {
+                previous_read_started_ns < current_read_started_ns
+                    && current_read_started_ns <= measured_ns
+                    && positive(previous_tf_k)
+                    && positive(current_tf_k)
+                    && d_tf_k_per_s.is_finite()
+                    && positive(fixture_capacity_j_per_k)
+                    && nonnegative(fixture_parasitic_w)
+            }
+            Self::Unavailable { .. } => true,
+        }
+    }
+}
+
+impl ModeBodyChangeV1 {
+    fn valid(&self) -> bool {
+        self.request.is_object()
+            && match self.outcome {
+                ModeChangeOutcomeV1::Applied {
+                    temperature_before_k,
+                    temperature_after_k,
+                    dh_event_j,
+                } => {
+                    positive(temperature_before_k)
+                        && positive(temperature_after_k)
+                        && dh_event_j.is_none_or(f64::is_finite)
+                }
+                ModeChangeOutcomeV1::Rejected => true,
+            }
+    }
+}
+
+fn positive(value: f64) -> bool {
+    value.is_finite() && value > 0.0
 }
 
 /// A1 scenario extension. Absence preserves the original v1 Inputs encoding.
@@ -299,6 +441,9 @@ impl Event<'_> {
                             && (matches!(frame.demand, Demand::VirtualBody { .. })
                                 || !frame.thermometer_connected
                                     && matches!(frame.demand, Demand::Observe))
+                    })
+                    && frame.mode_step_v1.as_ref().is_none_or(|step| {
+                        frame.a1_step_v1.is_none() && step.valid(frame.measured_ns)
                     })
                     && frame.wall_time_s.is_finite()
                     && frame.power.iter().all(|sample| {

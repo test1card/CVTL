@@ -3,7 +3,7 @@
 // START_MODULE_CONTRACT
 //   PURPOSE: Load and validate the recorded offline profile
 //   SCOPE: Verify identity and digests, load control and thermal boundary parameters
-//   DEPENDS: M-CVTL-CORE, M-CVTL-CONTROL, M-CVTL-SAFETY, M-CVTL-STORE, M-CVTL-PHYSICS, M-CVTL-ANALYSIS
+//   DEPENDS: M-CVTL-CORE, M-CVTL-CONTROL, M-CVTL-SAFETY, M-CVTL-STORE, M-CVTL-PHYSICS, M-CVTL-ANALYSIS, M-CVTL-SIM
 //   LINKS: M-CVTL-CLI
 //   ROLE: RUNTIME
 //   MAP_MODE: EXPORTS
@@ -34,11 +34,15 @@ use cvtl_safety::{
     monitor::{HeadProfile, ProtectionProfile},
     supervisor::Supervisor,
 };
+use cvtl_sim::modes::{
+    Compensation, ModeSetup, ModeSnapshot, VirtualBody, PROFILE as MODES_PROFILE,
+};
 use cvtl_store::record::MAX_RUN_HEADER_BYTES;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::a1::{ConfiguredParameters, Parameters, ThermalReplay};
+use super::modes::ModesReplay;
 use crate::quantity;
 
 const MAX_HEADER: u64 = MAX_RUN_HEADER_BYTES as u64;
@@ -72,6 +76,7 @@ struct Snapshot {
 struct TestOnly {
     scenario: String,
     a1: Option<yaml_serde::Value>,
+    modes: Option<ModeSnapshot>,
     temperature_channels: TemperatureChannels,
     control: Control,
     pi: Pi,
@@ -170,13 +175,14 @@ pub(super) struct Profile {
     pub controller: Controller,
     pub supervisor: Supervisor,
     pub a1: Option<ThermalReplay>,
+    pub modes: Option<ModesReplay>,
     pub analysis_model: Option<Result<Model, String>>,
     test_only: TestOnly,
 }
 
 impl Profile {
     pub(super) fn fresh_controller(&self) -> Result<Controller, String> {
-        self.test_only.controller()
+        self.test_only.controller(self.modes.as_ref())
     }
 }
 
@@ -194,6 +200,7 @@ pub(super) fn load(run: &Path, analysis: bool) -> Result<Profile, String> {
         "test_only_m6_recording_v1" => PROFILE,
         A1_PROFILE => A1_PROFILE,
         CONFIGURED_A1_PROFILE => CONFIGURED_A1_PROFILE,
+        MODES_PROFILE => MODES_PROFILE,
         _ => return Err("Несовместимая схема, профиль, версия или идентификатор прогона".into()),
     };
     if meta.schema != cvtl_store::record::SCHEMA
@@ -209,7 +216,12 @@ pub(super) fn load(run: &Path, analysis: bool) -> Result<Profile, String> {
         &meta.config_sha256,
         Sha256::digest(&config),
     )?;
-    let catalog = verify_references(run, &meta, expected_profile != PROFILE)?;
+    let legacy_a1 = matches!(expected_profile, A1_PROFILE | CONFIGURED_A1_PROFILE);
+    let catalog = if expected_profile == MODES_PROFILE {
+        None
+    } else {
+        verify_references(run, &meta, legacy_a1)?
+    };
     let snapshot: Snapshot =
         yaml_serde::from_slice(&config).map_err(|e| format!("Ошибка снимка YAML: {e}"))?;
     if snapshot.hardware_enabled {
@@ -226,7 +238,40 @@ pub(super) fn load(run: &Path, analysis: bool) -> Result<Profile, String> {
     {
         return Err("Неподдерживаемый профиль параметров REPLAY v1".into());
     }
-    let (a1, analysis_model) = if expected_profile != PROFILE {
+    let modes = if expected_profile == MODES_PROFILE {
+        if test.a1.is_some() {
+            return Err("Операторский профиль содержит несовместимые поля".into());
+        }
+        let snapshot = test
+            .modes
+            .take()
+            .ok_or("Отсутствуют параметры операторского профиля")?;
+        snapshot.validate()?;
+        if snapshot.mode.temperature_age()
+            != Duration::from_millis(test.safety.max_temperature_age_ms)
+            || snapshot.mode.hold_config().is_some() && test.control.max_sample_age_s != 0.5
+        {
+            return Err("Сроки пригодности операторского профиля не согласованы".into());
+        }
+        let virtual_body = matches!(&snapshot.mode, ModeSetup::VirtualBody { .. });
+        if !virtual_body && !meta.references.is_empty() {
+            return Err("Операторский профиль содержит несовместимые справочники".into());
+        }
+        let catalog = verify_references(run, &meta, virtual_body)?;
+        let (body, compensation) = if virtual_body {
+            let catalog = catalog.ok_or("Отсутствует архивный каталог nist_csv")?;
+            let compensation = Compensation::new(&snapshot, &catalog)?;
+            (Some(VirtualBody::new(&snapshot, catalog)?), compensation)
+        } else {
+            (None, None)
+        };
+        Some(ModesReplay::new(snapshot, body, compensation))
+    } else if test.modes.is_some() {
+        return Err("Параметры операторского режима вне его профиля".into());
+    } else {
+        None
+    };
+    let (a1, analysis_model) = if legacy_a1 {
         let parameters = test
             .a1
             .take()
@@ -244,13 +289,15 @@ pub(super) fn load(run: &Path, analysis: bool) -> Result<Profile, String> {
             ThermalReplay::new(&parameters, &catalog, age)?
         };
         (Some(thermal), model)
+    } else if let Some(modes) = &modes {
+        (None, analysis.then(|| modes.analysis_model()))
     } else {
         (
             None,
             analysis.then(|| Err("Прогон не содержит тепловых интервалов A1".into())),
         )
     };
-    let controller = test.controller()?;
+    let controller = test.controller(modes.as_ref())?;
     let supervisor = test.supervisor()?;
     Ok(Profile {
         meta,
@@ -258,6 +305,7 @@ pub(super) fn load(run: &Path, analysis: bool) -> Result<Profile, String> {
         controller,
         supervisor,
         a1,
+        modes,
         analysis_model,
         test_only: test,
     })
@@ -363,7 +411,11 @@ fn check_hash(name: &str, expected: &str, actual: impl std::fmt::LowerHex) -> Re
     Ok(())
 }
 
-fn verify_references(run: &Path, meta: &Meta, a1: bool) -> Result<Option<String>, String> {
+fn verify_references(
+    run: &Path,
+    meta: &Meta,
+    load_catalog: bool,
+) -> Result<Option<String>, String> {
     match (meta.references_status.as_str(), meta.references.is_empty()) {
         ("not_used", true) => return Ok(None),
         ("embedded", false) => {}
@@ -380,7 +432,7 @@ fn verify_references(run: &Path, meta: &Meta, a1: bool) -> Result<Option<String>
             return Err("Недопустимое или повторное имя справочника".into());
         }
         let path = dir.join(&reference.name);
-        if a1 && reference.name == "nist_csv" {
+        if load_catalog && reference.name == "nist_csv" {
             let bytes = header(&path)?;
             check_hash(&reference.name, &reference.sha256, Sha256::digest(&bytes))?;
             catalog = Some(String::from_utf8(bytes).map_err(|_| "Каталог nist_csv не в UTF-8")?);
@@ -408,7 +460,7 @@ fn quantities<T: Copy, const N: usize>(
 }
 
 impl TestOnly {
-    fn controller(&self) -> Result<Controller, String> {
+    fn controller(&self, modes: Option<&ModesReplay>) -> Result<Controller, String> {
         let pi = &self.pi;
         let c = &self.control;
         let range = ResistanceRange::new(
@@ -437,7 +489,7 @@ impl TestOnly {
             margins: Margins::new(c.margin, c.margin).map_err(|_| "Некорректный запас снимка")?,
             total_limit: quantity(Watts::new(c.total_limit_w), "total_limit_w")?,
             max_sample_age: quantity(Seconds::new(c.max_sample_age_s), "max_sample_age_s")?,
-            temperature_hold: None,
+            temperature_hold: modes.and_then(|modes| modes.mode().hold_config()),
         };
         let slew = quantity(WattsPerSecond::new(c.slew_w_per_s), "slew_w_per_s")?;
         let allocator = Allocator::new(None, slew, slew, [slew; 2], [slew; 2])

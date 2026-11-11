@@ -36,8 +36,11 @@ pub fn export_archive(run: &Path, options: Options) -> Result<String, String> {
     let publication_error =
         |error| format!("Ошибка публикации экспорта {} ({error})", run.display());
     let mut staging = Staging::new(run).map_err(publication_error)?;
-    let mut tables = Tables::open(&staging.directory)?;
-    let (checked, source) = check_export(run, &mut |sample| tables.push(sample))?;
+    let (checked, source, tables) = check_export(
+        run,
+        |operator_modes| Tables::open(&staging.directory, operator_modes),
+        Tables::push,
+    )?;
     let rows = tables.finish()?;
     let (completion, analysis) = export_analysis(run, &checked, options)?;
     let status = if completion.status == "verified" {

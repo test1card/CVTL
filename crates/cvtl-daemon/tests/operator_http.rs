@@ -135,9 +135,32 @@ impl Daemon {
     }
 
     fn action(&self, request: &Value) {
+        let result = self.action_result(request);
+        assert_eq!(result["ok"], true, "{result}");
+    }
+
+    fn action_result(&self, request: &Value) -> Value {
         let id = self.enqueue("/api/action", request);
         let state = self.await_value("/api/state", |state| state["last_action"]["id"] == id);
+        state["last_action"].clone()
+    }
+
+    fn prepare_mode(&self, setup: &Value) -> (String, Value, Value) {
+        let preview_id = self.enqueue("/api/preview", setup);
+        let job = self.await_value("/api/job", |job| job["id"] == preview_id);
+        assert!(job["error"].is_null(), "{job}");
+        let request = self.enqueue("/api/run", &json!({"preview_id":preview_id}));
+        let state = self.await_value("/api/state", |state| {
+            state["last_action"]["id"] == request
+                && (state["last_action"]["ok"] == false || state["run"]["ready"] == true)
+        });
         assert_eq!(state["last_action"]["ok"], true, "{state}");
+        assert_eq!(state["run"]["output_state"], "off_verified");
+        (
+            state["run"]["id"].as_str().unwrap().to_owned(),
+            job["value"].clone(),
+            state["run"].clone(),
+        )
     }
 
     fn prepare(&self) -> String {
@@ -332,6 +355,140 @@ fn live_changes_and_two_completed_runs_are_replayable() {
         .unwrap()
         .iter()
         .any(|sample| sample["change"]["mass_kg"] == 16.0));
+}
+
+#[test]
+fn explicit_ordinary_modes_use_the_same_http_and_archive_paths() {
+    let daemon = Daemon::start(false);
+    let defaults = daemon.get("/api/defaults");
+    assert!(defaults.get("mode").is_none());
+    for mode in [
+        json!({"kind":"observe"}),
+        json!({"kind":"constant","power_w":0.75}),
+        json!({"kind":"power_profile","points":[{"elapsed_ms":0,"power_w":0.75},{"elapsed_ms":1000,"power_w":1.25}]}),
+        json!({"kind":"temperature_hold","setpoint_k":15.2}),
+    ] {
+        let kind = mode["kind"].as_str().unwrap();
+        let mut setup = defaults.clone();
+        setup["mode"] = mode.clone();
+        let (run, estimate, ready) = daemon.prepare_mode(&setup);
+        assert_eq!(estimate["preview"], json!([]), "{estimate}");
+        assert_eq!(ready["mode"], mode);
+        assert!(ready["parameters"].is_null());
+        if kind == "observe" {
+            assert_eq!(
+                daemon.action_result(&json!({"run":run,"kind":"arm"}))["ok"],
+                false
+            );
+            assert_eq!(
+                daemon.action_result(&json!({"run":run,"kind":"start","confirmed":true}))["ok"],
+                false
+            );
+            let state = daemon.get("/api/state");
+            assert_eq!(state["run"]["output_state"], "off_verified");
+            assert!(state["run"]["samples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|sample| {
+                    sample["mode_v1"]["kind"] == kind && sample["temperatures_k"][1].is_number()
+                }));
+        } else {
+            daemon.action(&json!({"run":run,"kind":"arm"}));
+            daemon.action(&json!({"run":run,"kind":"start","confirmed":true}));
+            let state = daemon.await_value("/api/state", |state| {
+                state["run"]["samples"].as_array().is_some_and(|samples| {
+                    samples.iter().any(|sample| {
+                        sample["mode_v1"]["kind"] == kind
+                            && sample["requested_w"]
+                                .as_f64()
+                                .is_some_and(|watts| watts > 0.0)
+                    })
+                })
+            });
+            assert_eq!(state["run"]["output_state"], "on_verified");
+            if kind == "temperature_hold" {
+                assert_eq!(estimate["limits"]["max_temperature_age_ms"], 150);
+            }
+        }
+        daemon.stop(&run);
+        let replay = daemon.job("/api/archive", &json!({"kind":"replay","run":run}));
+        assert_eq!(replay["receipt_verified"], true, "{replay}");
+        assert_eq!(replay["report"]["status"], "matched", "{replay}");
+        assert_eq!(replay["report"]["mode"], kind, "{replay}");
+        if kind == "observe" {
+            let (_, raw) = raw_witness(
+                fs::File::open(daemon.root.join("runs").join(&run).join("raw.ndjson.zst")).unwrap(),
+            );
+            assert_eq!(raw.on_intents, [None; 2]);
+            assert_eq!(raw.first_positive_drive, None);
+        }
+    }
+}
+
+#[test]
+fn virtual_mode_applies_only_recorded_changes_and_exports_compensation() {
+    let daemon = Daemon::start(false);
+    let mut setup = daemon.get("/api/defaults");
+    setup["mode"] = json!({"kind":"virtual_body","port":"stage2","body_heat_w":0.0});
+    let (run, estimate, _) = daemon.prepare_mode(&setup);
+    assert_eq!(estimate["preview"].as_array().unwrap().len(), 31);
+    let first_flow = estimate["preview"][0]["bridge_w"].as_f64().unwrap();
+    assert!((first_flow - 0.30).abs() < 1e-10, "{estimate}");
+    daemon.run(&run);
+    let bridge = json!({"kind":"conductor","material":"ofhc_rrr100","area_m2":1e-6,"length_m":0.1});
+    daemon.action(&json!({
+        "run":run,"kind":"change","mass_kg":16.0,"material":"al6061_t6","bridge":bridge,
+    }));
+    let state = daemon.await_value("/api/state", |state| {
+        state["run"]["last_mode_change"]["change"]["outcome"]["status"] == "applied"
+    });
+    let accepted = &state["run"]["last_mode_change"];
+    assert!(accepted["seq"].is_number());
+    assert_eq!(accepted["change"]["request"]["bridge"], bridge);
+    let parameters = &state["run"]["parameters"];
+    assert_eq!(parameters["material"], "al6061_t6");
+    assert_eq!(parameters["bridge"], bridge);
+    assert!(parameters["g_w_per_k"].is_null());
+    assert_eq!(
+        daemon.action_result(&json!({"run":run,"kind":"change","material":"unknown"}))["ok"],
+        false
+    );
+    assert_eq!(daemon.get("/api/state")["run"]["parameters"], *parameters);
+    daemon.stop(&run);
+    let replay = daemon.job("/api/archive", &json!({"kind":"replay","run":run}));
+    assert_eq!(replay["report"]["status"], "matched", "{replay}");
+
+    setup["body"]["bridge"]["conductance_w_per_k"] = json!(0.05);
+    setup["mode"] = json!({
+        "kind":"virtual_body","port":"tf",
+        "compensation":{"fixture_parasitic_w":0.05}
+    });
+    let (run, estimate, ready) = daemon.prepare_mode(&setup);
+    assert_eq!(estimate["preview"].as_array().unwrap().len(), 1);
+    assert_eq!(estimate["compensation"]["fixture_parasitic_w"], 0.05);
+    assert_eq!(ready["compensation_ready"], true);
+    assert!(ready["mode"]["compensation"].get("fixture").is_none());
+    daemon.run(&run);
+    let state = daemon.await_value("/api/state", |state| {
+        state["run"]["samples"].as_array().is_some_and(|samples| {
+            samples.iter().any(|sample| {
+                sample["mode_v1"]["compensation"]["status"] == "ready"
+                    && sample["requested_w"].is_number()
+                    && sample["requested_w"] != sample["bridge_flow_w"]
+            })
+        })
+    });
+    assert_eq!(state["run"]["output_state"], "on_verified");
+    daemon.stop(&run);
+    let replay = daemon.job("/api/archive", &json!({"kind":"replay","run":run}));
+    assert_eq!(replay["report"]["status"], "matched", "{replay}");
+    let dir = daemon.root.join("runs").join(&run);
+    let export = cvtl_cli::export_archive(&dir, Default::default()).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&export).unwrap()["status"],
+        "complete"
+    );
 }
 
 #[test]

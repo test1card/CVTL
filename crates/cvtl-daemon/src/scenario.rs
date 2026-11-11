@@ -25,8 +25,13 @@ use cvtl_physics::{
     InventoryPart,
 };
 use cvtl_safety::monitor::ProtectionProfile;
-use cvtl_sim::recording::{preview_a1, test_only_control_config, test_only_source_config};
+use cvtl_sim::{
+    modes::{preview_body, ModeSetup, ModeSnapshot},
+    recording::{preview_a1, test_only_control_config, test_only_source_config},
+};
 use serde::{Deserialize, Serialize};
+
+pub(crate) use cvtl_sim::modes::FixturePartSetup as FixturePart;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +39,8 @@ pub(crate) struct Setup {
     pub body: BodySetup,
     pub wiring: Vec<Wire>,
     pub fixture: Vec<FixturePart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ModeSetup>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -67,13 +74,6 @@ pub(crate) struct Wire {
     strands: u32,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct FixturePart {
-    material: String,
-    mass_kg: f64,
-}
-
 impl Default for Setup {
     fn default() -> Self {
         let wire = |from, to| Wire {
@@ -102,6 +102,7 @@ impl Default for Setup {
                 material: "ofhc_rrr100".into(),
                 mass_kg: 0.2,
             }],
+            mode: None,
         }
     }
 }
@@ -113,6 +114,14 @@ pub(crate) struct Estimate {
     pub wire_heat_by_node_w: [f64; 4],
     pub fixture_capacity_j_per_k: f64,
     pub limits: Limits,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compensation: Option<CompensationEstimate>,
+}
+
+#[derive(Clone, Serialize)]
+struct CompensationEstimate {
+    fixture_parasitic_w: f64,
+    fixture_capacity_j_per_k: f64,
 }
 
 #[derive(Clone, Serialize)]
@@ -153,15 +162,46 @@ pub(crate) struct Limits {
 }
 
 impl Setup {
+    pub(crate) fn mode_snapshot(&self) -> Result<Option<ModeSnapshot>, String> {
+        let Some(mut mode) = self.mode.clone() else {
+            return Ok(None);
+        };
+        if let ModeSetup::VirtualBody { compensation, .. } = &mut mode {
+            if let Some(setup) = compensation {
+                if !setup.fixture.is_empty() {
+                    return Err("Для компенсации используйте опись насадки сценария".into());
+                }
+                setup.fixture.clone_from(&self.fixture);
+            }
+            ModeSnapshot::with_body(mode, self.body.clone()).map(Some)
+        } else {
+            ModeSnapshot::new(mode).map(Some)
+        }
+    }
+
     pub(crate) fn estimate(&self) -> Result<Estimate, String> {
-        let limits = limits()?;
+        let mut limits = limits()?;
         let cap = limits
             .envelope_total_w
             .min(2.0 * limits.source_power_w)
             .min(limits.protection_total_w);
-        let preview = preview_a1(&self.body, finite(Watts::new(cap))?)
-            .map_err(|error| format!("Прогноз A1 недоступен ({error})"))?;
-        let temperatures = preview[0].temperatures_k;
+        let cap = finite(Watts::new(cap))?;
+        let mode = self.mode_snapshot()?;
+        let (preview, temperatures) = if let Some(snapshot) = &mode {
+            limits.max_temperature_age_ms = snapshot.mode.temperature_age().as_millis() as u64;
+            let preview = if snapshot.body.is_some() {
+                preview_body(snapshot, cap)
+                    .map_err(|error| format!("Прогноз виртуального тела недоступен ({error})"))?
+            } else {
+                Vec::new()
+            };
+            (preview, snapshot.head.initial_k)
+        } else {
+            let preview = preview_a1(&self.body, cap)
+                .map_err(|error| format!("Прогноз A1 недоступен ({error})"))?;
+            let temperatures = preview[0].temperatures_k;
+            (preview, temperatures)
+        };
         let wiring = self
             .wiring
             .iter()
@@ -192,6 +232,16 @@ impl Setup {
             .collect::<Result<Vec<_>, String>>()?;
         let capacity = fixture_heat_capacity(&inventory)
             .map_err(|error| format!("Расчёт теплоёмкости насадки недоступен ({error})"))?;
+        let compensation = match mode.map(|snapshot| snapshot.mode) {
+            Some(ModeSetup::VirtualBody {
+                compensation: Some(setup),
+                ..
+            }) => Some(CompensationEstimate {
+                fixture_parasitic_w: setup.fixture_parasitic_w,
+                fixture_capacity_j_per_k: capacity.get(),
+            }),
+            _ => None,
+        };
         Ok(Estimate {
             preview: preview
                 .into_iter()
@@ -207,6 +257,7 @@ impl Setup {
             wire_heat_by_node_w: heat,
             fixture_capacity_j_per_k: capacity.get(),
             limits,
+            compensation,
         })
     }
 }

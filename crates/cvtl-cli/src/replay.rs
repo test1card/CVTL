@@ -2,8 +2,8 @@
 // VERSION: 0.1.0
 // START_MODULE_CONTRACT
 //   PURPOSE: Recompute a verified recording offline
-//   SCOPE: Logical operations, causal evidence and thermal analysis inputs for A1
-//   DEPENDS: M-CVTL-STORE, M-CVTL-CONTROL, M-CVTL-SAFETY, M-CVTL-ANALYSIS
+//   SCOPE: Logical operations, causal evidence and thermal analysis inputs
+//   DEPENDS: M-CVTL-STORE, M-CVTL-CONTROL, M-CVTL-SAFETY, M-CVTL-ANALYSIS, M-CVTL-SIM
 //   LINKS: M-CVTL-CLI
 //   ROLE: RUNTIME
 //   MAP_MODE: EXPORTS
@@ -14,10 +14,12 @@
 //   check_thermal - project recorded intervals after successful replay checks
 //   check_export - stream verified ticks and identify the consumed archive bytes
 //   TimelineSample - accepted input and control data for one plotted tick
+//   ModeTimelineSample - operator profile fields absent from legacy projections
 // END_MODULE_MAP
 //! Recompute decisions offline and compare them to the verified raw stream.
 
 mod a1;
+mod modes;
 mod profile;
 
 use std::{
@@ -40,6 +42,7 @@ use cvtl_safety::{
     },
     Branch, FaultReason,
 };
+use cvtl_sim::modes::{control_demand, BodyPort, ModeSetup};
 use cvtl_store::{
     record::{
         self as raw, Channel, Command, Correlation, Event, Inputs, Quality, Record, ThermalPoint,
@@ -76,6 +79,34 @@ pub struct TimelineSample {
     pub current_limited: bool,
     pub equivalence: Option<String>,
     pub change: Option<raw::A1ChangeV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode_v1: Option<ModeTimelineSample>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ModeTimelineSample {
+    pub kind: &'static str,
+    pub hold_setpoint_k: Option<f64>,
+    pub port: Option<BodyPort>,
+    pub held_age_ns: Option<u64>,
+    pub compensation: Option<raw::ModeCompensationV1>,
+    pub change: Option<raw::ModeBodyChangeV1>,
+    #[serde(skip)]
+    pub(crate) changed_bridge_json: Option<String>,
+}
+
+impl ModeTimelineSample {
+    pub(crate) fn changed_material(&self) -> Option<&str> {
+        let change = self.change.as_ref()?;
+        matches!(change.outcome, raw::ModeChangeOutcomeV1::Applied { .. })
+            .then(|| {
+                change
+                    .request
+                    .get("material")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .flatten()
+    }
 }
 
 impl TimelineSample {
@@ -86,9 +117,17 @@ impl TimelineSample {
             | raw::Demand::VirtualBody { requested_w } => Some(requested_w),
             _ => None,
         };
-        let bridge_flow_w = match frame.demand {
-            raw::Demand::VirtualBody { requested_w } => Some(requested_w),
-            _ => None,
+        let body = frame
+            .mode_step_v1
+            .as_ref()
+            .and_then(|step| step.body.as_ref());
+        let bridge_flow_w = if let Some(body) = body {
+            body.q_v_w
+        } else {
+            match frame.demand {
+                raw::Demand::VirtualBody { requested_w } => Some(requested_w),
+                _ => None,
+            }
         };
         let temperatures_k = frame.temperatures.map(|sample| {
             sample
@@ -108,7 +147,9 @@ impl TimelineSample {
             seq,
             measured_ns: frame.measured_ns,
             temperatures_k,
-            body_k: frame.a1_step_v1.map(|step| step.body_temperature_k),
+            body_k: body
+                .map(|body| body.temperature_k)
+                .or_else(|| frame.a1_step_v1.map(|step| step.body_temperature_k)),
             measured_w,
             requested_w,
             bridge_flow_w,
@@ -121,7 +162,44 @@ impl TimelineSample {
             current_limited: false,
             equivalence: None,
             change: frame.a1_step_v1.and_then(|step| step.change),
+            mode_v1: None,
         }
+    }
+
+    pub fn apply_operator_mode(&mut self, mode: &ModeSetup, step: Option<&raw::ModeStepV1>) {
+        let (hold_setpoint_k, port) = match mode {
+            ModeSetup::TemperatureHold { setpoint_k } => (Some(*setpoint_k), None),
+            ModeSetup::VirtualBody { port, .. } => (None, Some(*port)),
+            _ => (None, None),
+        };
+        let body = step.and_then(|step| step.body.as_ref());
+        let change = body.and_then(|body| body.change.clone());
+        let changed_bridge_json = change.as_ref().and_then(|change| {
+            if !matches!(change.outcome, raw::ModeChangeOutcomeV1::Applied { .. }) {
+                return None;
+            }
+            let request = &change.request;
+            if let Some(bridge) = request.get("bridge") {
+                return Some(bridge.to_string());
+            }
+            let conductance = request.get("g_w_per_k")?;
+            Some(
+                serde_json::json!({
+                    "kind": "constant",
+                    "conductance_w_per_k": conductance,
+                })
+                .to_string(),
+            )
+        });
+        self.mode_v1 = Some(ModeTimelineSample {
+            kind: mode.kind(),
+            hold_setpoint_k,
+            port,
+            held_age_ns: body.map(|body| body.held_age_ns),
+            compensation: body.and_then(|body| body.compensation),
+            change,
+            changed_bridge_json,
+        });
     }
 
     pub fn apply_control(&mut self, event: &Event<'_>) {
@@ -203,6 +281,10 @@ pub struct Report {
     first_diagnostic: Option<Diagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     a1: Option<a1::Summary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fixture_compensation: Option<bool>,
 }
 
 impl Report {
@@ -258,13 +340,20 @@ pub(crate) fn check_thermal(dir: &Path) -> Result<CheckedThermal, String> {
 
 type EmitTick<'a> = &'a mut dyn FnMut(TimelineSample) -> Result<(), String>;
 
-pub(crate) fn check_export(
+pub(crate) fn check_export<T>(
     dir: &Path,
-    emit: EmitTick<'_>,
-) -> Result<(CheckedThermal, ExportProvenance), String> {
-    let mut checked = compare(dir, Projection::Export(emit))?;
+    open: impl FnOnce(bool) -> Result<T, String>,
+    mut push: impl FnMut(&mut T, TimelineSample) -> Result<(), String>,
+) -> Result<(CheckedThermal, ExportProvenance, T), String> {
+    let profile = profile::load(dir, true)?;
+    let mut sink = open(profile.modes.is_some())?;
+    let mut checked = compare_loaded(
+        dir,
+        profile,
+        Projection::Export(&mut |sample| push(&mut sink, sample)),
+    )?;
     let source = checked.source.take().expect("export hashes its source");
-    Ok((checked.into_thermal(), source))
+    Ok((checked.into_thermal(), source, sink))
 }
 
 enum Projection<'a> {
@@ -293,9 +382,17 @@ impl Compared {
 }
 
 fn compare(dir: &Path, projection: Projection<'_>) -> Result<Compared, String> {
+    let profile = profile::load(dir, matches!(projection, Projection::Thermal))?;
+    compare_loaded(dir, profile, projection)
+}
+
+fn compare_loaded(
+    dir: &Path,
+    mut profile: profile::Profile,
+    projection: Projection<'_>,
+) -> Result<Compared, String> {
     let archive = matches!(projection, Projection::Archive | Projection::Thermal);
     let export = matches!(projection, Projection::Export(_));
-    let mut profile = profile::load(dir, export || matches!(projection, Projection::Thermal))?;
     let thermal = profile.analysis_model.take().map(ThermalCapture::new);
     let mut replay = Replay {
         profile,
@@ -423,6 +520,16 @@ fn compare(dir: &Path, projection: Projection<'_>) -> Result<Compared, String> {
         output_state_at_boundary: output_name(replay.verified_output),
         first_diagnostic: replay.first,
         a1: replay.profile.a1.map(|thermal| thermal.summary),
+        mode: replay
+            .profile
+            .modes
+            .as_ref()
+            .map(|modes| modes.mode().kind()),
+        fixture_compensation: replay
+            .profile
+            .modes
+            .as_ref()
+            .and_then(|modes| modes.has_compensation().then_some(true)),
     };
     let samples = replay.samples.unwrap_or_default();
     let archive = ArchiveReplay {
@@ -575,10 +682,26 @@ impl Replay<'_> {
         let op = self
             .operation
             .get_or_insert_with(|| Operation::new(id, row.seq));
+        let input_profile = if let Some(modes) = &self.profile.modes {
+            InputProfile::Modes {
+                track_tf: modes.has_compensation()
+                    || matches!(
+                        modes.mode(),
+                        ModeSetup::VirtualBody {
+                            port: BodyPort::Tf,
+                            ..
+                        }
+                    ),
+            }
+        } else if self.profile.a1.is_some() {
+            InputProfile::A1
+        } else {
+            InputProfile::M6
+        };
         if let Err(diagnostic) = op.push(
             row.seq,
             row.event,
-            self.profile.a1.is_some(),
+            input_profile,
             self.samples.is_some() || self.emit.is_some(),
         ) {
             self.first = Some(diagnostic);
@@ -599,7 +722,15 @@ impl Replay<'_> {
                 Ok(()) => {
                     self.verified_output = self.profile.supervisor.output_state();
                     self.last_verified_seq = op.last;
-                    if let Some(sample) = op.sample {
+                    if let Some(mut sample) = op.sample {
+                        if let Some(modes) = &self.profile.modes {
+                            let step = op
+                                .input
+                                .as_ref()
+                                .and_then(|frame| frame.mode.as_ref())
+                                .and_then(|mode| mode.step.as_ref());
+                            sample.apply_operator_mode(modes.mode(), step);
+                        }
                         if let Some(emit) = &mut self.emit {
                             self.export_error = emit(sample).err();
                         } else if let Some(samples) = &mut self.samples {
@@ -624,7 +755,17 @@ impl Replay<'_> {
         }
         let mut journal = CompareJournal::new(op);
         let mut thermal_end = None;
+        let mut accept_fixture = false;
         let effect = if let Some(action) = op.operator {
+            if matches!(action.0, OperatorAction::Arm | OperatorAction::Start)
+                && self
+                    .profile
+                    .modes
+                    .as_ref()
+                    .is_some_and(|modes| matches!(modes.mode(), ModeSetup::Observe))
+            {
+                return Err(op.mismatch(op.first, "Наблюдение не принимает Arm и Start"));
+            }
             let input = match action.0 {
                 OperatorAction::Stop => stop_input(action.1),
                 _ => op
@@ -635,12 +776,24 @@ impl Replay<'_> {
                     .clone(),
             };
             if let Some(frame) = &op.input {
-                if frame.thermal.is_some_and(|thermal| {
-                    thermal.step.is_some() || !matches!(frame.tick.demand, Demand::Observe)
-                }) {
-                    return Err(
-                        op.mismatch(frame.seq, "Операторские входы A1 должны быть наблюдением")
-                    );
+                frame.verify_operator_inputs(op)?;
+                let heat_state = match action.0 {
+                    OperatorAction::Arm => Some(MachineState::OutputOffVerified),
+                    OperatorAction::Start => Some(MachineState::Armed),
+                    _ => None,
+                };
+                if let Some((modes, required_state)) = self.profile.modes.as_mut().zip(heat_state) {
+                    if let Some((prior_ready, current_ready)) = modes.request_pair(frame) {
+                        if self.profile.supervisor.state() != required_state
+                            || !prior_ready
+                            || !current_ready
+                        {
+                            return Err(
+                                op.mismatch(frame.seq, "Нет пригодной пары tf для команды нагрева")
+                            );
+                        }
+                        accept_fixture = true;
+                    }
                 }
             }
             let decision = match self
@@ -650,7 +803,7 @@ impl Replay<'_> {
             {
                 Ok(decision) => Some(decision),
                 Err(MachineError::InvalidState)
-                    if self.profile.a1.is_some()
+                    if (self.profile.a1.is_some() || self.profile.modes.is_some())
                         && action.0 == OperatorAction::Start
                         && self.profile.supervisor.state() == MachineState::OutputOffVerified =>
                 {
@@ -667,6 +820,9 @@ impl Replay<'_> {
             journal.finish()?;
             if action.0 == OperatorAction::Reset {
                 self.profile.controller.reset_fault();
+                if let Some(modes) = &mut self.profile.modes {
+                    modes.clear_compensation();
+                }
             }
             decision.and_then(|decision| decision.effect)
         } else if op.id == Correlation::Run {
@@ -689,6 +845,7 @@ impl Replay<'_> {
                     .map_err(|_| op.mismatch(op.first, "Нет запроса начального OFF"))?,
             )
         } else if matches!(op.id, Correlation::Tick(_)) {
+            accept_fixture = true;
             let input = op
                 .input
                 .as_ref()
@@ -696,6 +853,12 @@ impl Replay<'_> {
             let mut tick = input.tick;
             if let Some(thermal) = &mut self.profile.a1 {
                 (tick.demand, thermal_end) = thermal.advance(input, op)?;
+            } else if let Some(modes) = &mut self.profile.modes {
+                thermal_end = modes.verify_tick(
+                    input,
+                    op,
+                    self.profile.supervisor.state() == MachineState::Running,
+                )?;
             }
             let safety = self
                 .profile
@@ -721,7 +884,33 @@ impl Replay<'_> {
             }
             effect
         } else {
-            return Err(op.insufficient("В журнале нет операторского действия"));
+            let modes = self
+                .profile
+                .modes
+                .as_mut()
+                .filter(|modes| modes.has_compensation())
+                .ok_or_else(|| op.insufficient("В журнале нет операторского действия"))?;
+            let frame = op
+                .input
+                .as_ref()
+                .ok_or_else(|| op.insufficient("Отсутствуют входы отклонённой команды"))?;
+            frame.verify_operator_inputs(op)?;
+            let can_deny_pair = matches!(
+                self.profile.supervisor.state(),
+                MachineState::OutputOffVerified | MachineState::Armed
+            ) && modes
+                .request_pair(frame)
+                .is_some_and(|(prior, current)| prior && !current);
+            let decision = self
+                .profile
+                .supervisor
+                .observe(&frame.monitor, &mut journal);
+            if !can_deny_pair && !journal.observation_faulted {
+                return Err(op.mismatch(frame.seq, "Нет основания для отказа операторской команды"));
+            }
+            journal.finish()?;
+            modes.clear_compensation();
+            decision.effect
         };
         if let Some(effect) = effect {
             self.apply_effect(op, effect)?;
@@ -732,6 +921,14 @@ impl Replay<'_> {
         op.check_output(&self.profile.supervisor, effect.is_some())?;
         if let (Some(thermal), Some(end)) = (&mut self.profile.a1, thermal_end) {
             thermal.verify_boundary(end);
+        } else if let (Some(modes), Some(frame)) = (&mut self.profile.modes, &op.input) {
+            modes.accept_frame(
+                frame,
+                thermal_end,
+                accept_fixture
+                    && !matches!(effect, Some(Effect::DisableBoth(_)))
+                    && self.profile.supervisor.fault_reason().is_none(),
+            );
         }
         if let Correlation::Tick(id) = op.id {
             if let (Some(capture), Some(frame)) = (&mut self.thermal, &op.input) {
@@ -751,6 +948,9 @@ impl Replay<'_> {
         let supervisor = &mut self.profile.supervisor;
         match effect {
             Effect::DisableBoth(token) => {
+                if let Some(modes) = &mut self.profile.modes {
+                    modes.off();
+                }
                 let recovering = op.id == Correlation::Run && op.operator.is_none();
                 let intent = if recovering {
                     if !op.intents.is_empty()
@@ -782,7 +982,7 @@ impl Replay<'_> {
                     && op
                         .operator
                         .is_some_and(|(action, _)| action == OperatorAction::Stop);
-                if self.profile.a1.is_some()
+                if (self.profile.a1.is_some() || self.profile.modes.is_some())
                     && !recovering
                     && op.wire.writes.is_empty()
                     && supervisor.fault_reason() == Some(FaultReason::SourceLinkLost)
@@ -846,6 +1046,15 @@ impl Replay<'_> {
                     thermal.start(frame, op)?;
                     self.profile.controller = self.profile.fresh_controller().map_err(|_| {
                         op.mismatch(op.first, "Невозможно восстановить контроллер A1")
+                    })?;
+                } else if let Some(modes) = &mut self.profile.modes {
+                    let frame = op
+                        .input
+                        .as_ref()
+                        .ok_or_else(|| op.insufficient("Отсутствуют входы Start режима"))?;
+                    modes.start(frame, op)?;
+                    self.profile.controller = self.profile.fresh_controller().map_err(|_| {
+                        op.mismatch(op.first, "Невозможно восстановить контроллер режима")
                     })?;
                 } else {
                     self.profile.controller.reset_fault();
@@ -928,7 +1137,7 @@ impl Operation {
         &mut self,
         seq: u64,
         event: Event<'_>,
-        a1: bool,
+        input_profile: InputProfile,
         collect_samples: bool,
     ) -> Result<(), Diagnostic> {
         self.rows += 1;
@@ -947,11 +1156,11 @@ impl Operation {
                 {
                     return Err(self.mismatch(seq, "Повторные или запоздалые входы"));
                 }
-                self.input = Some(Frame::from_raw(seq, frame, a1).map_err(|_| {
-                    self.insufficient(if a1 {
-                        "Неподдерживаемые или неполные входы A1"
-                    } else {
-                        "Неподдерживаемые или неполные входы v1"
+                self.input = Some(Frame::from_raw(seq, frame, input_profile).map_err(|_| {
+                    self.insufficient(match input_profile {
+                        InputProfile::A1 => "Неподдерживаемые или неполные входы A1",
+                        InputProfile::M6 => "Неподдерживаемые или неполные входы v1",
+                        InputProfile::Modes { .. } => "Неподдерживаемые или неполные входы режима",
                     })
                 })?);
                 if let (true, Correlation::Tick(tick)) = (collect_samples, self.id) {
@@ -1127,21 +1336,54 @@ impl Operation {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputProfile {
+    M6,
+    A1,
+    Modes { track_tf: bool },
+}
+
 struct Frame {
     seq: u64,
+    scheduled_ns: u64,
     monitor: MonitorInput,
     tick: Tick,
     thermal: Option<a1::ThermalInput>,
+    mode: Option<modes::ModeInput>,
 }
 impl Frame {
     fn measured_ns(&self) -> u64 {
         self.monitor.monotonic.as_nanos() as u64
     }
 
+    fn verify_operator_inputs(&self, op: &Operation) -> Result<(), Diagnostic> {
+        if self.thermal.is_some_and(|thermal| {
+            thermal.step.is_some()
+                || self.mode.as_ref().is_some_and(|mode| mode.step.is_some())
+                || !matches!(self.tick.demand, Demand::Observe)
+        }) {
+            return Err(op.mismatch(
+                self.seq,
+                if self.mode.is_some() {
+                    "Операторские входы режима должны быть наблюдением"
+                } else {
+                    "Операторские входы A1 должны быть наблюдением"
+                },
+            ));
+        }
+        Ok(())
+    }
+
     fn thermal_interval(&self, end_ns: u64, eligible: bool) -> Option<Interval> {
         let thermal = self.thermal?;
-        let step = thermal.step?;
-        let begin_ns = end_ns.checked_sub(step.interval_ns)?;
+        let (interval_ns, heater_energy_j) = if let Some(mode) = &self.mode {
+            let step = mode.step.as_ref()?;
+            (step.interval_ns, step.heater_energy_j)
+        } else {
+            let step = thermal.step?;
+            (step.interval_ns, step.heater_energy_j)
+        };
+        let begin_ns = end_ns.checked_sub(interval_ns)?;
         let valid = eligible
             && self.monitor.model_valid
             && self.monitor.source_connected
@@ -1162,12 +1404,12 @@ impl Frame {
         Some(Interval {
             begin_ns,
             end_ns,
-            heater_energy_j: step.heater_energy_j,
+            heater_energy_j,
             end_k,
         })
     }
 
-    fn from_raw(seq: u64, frame: &Inputs<'_>, a1: bool) -> Result<Self, String> {
+    fn from_raw(seq: u64, frame: &Inputs<'_>, input_profile: InputProfile) -> Result<Self, String> {
         if frame.power.map(|row| row.channel) != CHANNELS
             || frame.temperatures.map(|row| row.point)
                 != [
@@ -1186,19 +1428,26 @@ impl Frame {
             "warming" => CoolingPhase::Warming,
             _ => return Err("Неизвестная фаза".into()),
         };
-        let demand = match (a1, frame.demand) {
-            (false, raw::Demand::Power { requested_w }) => {
+        let modes = matches!(input_profile, InputProfile::Modes { .. });
+        if (modes && (frame.a1_step_v1.is_some() || frame.allow_stale_once))
+            || (!modes && frame.mode_step_v1.is_some())
+        {
+            return Err("Тепловые входы или политика свежести вне профиля".into());
+        }
+        let demand = match (input_profile, frame.demand) {
+            (InputProfile::M6, raw::Demand::Power { requested_w }) => {
                 Demand::Power(quantity(Watts::new(requested_w), "requested_w")?)
             }
-            (true, raw::Demand::VirtualBody { requested_w }) => {
+            (InputProfile::A1, raw::Demand::VirtualBody { requested_w }) => {
                 Demand::VirtualBody(quantity(Watts::new(requested_w), "requested_w")?)
             }
-            (true, raw::Demand::Observe) => Demand::Observe,
+            (InputProfile::A1, raw::Demand::Observe) => Demand::Observe,
+            (InputProfile::Modes { .. }, demand) => control_demand(demand)?,
             _ => return Err("Входной режим вне профиля v1".into()),
         };
         let (a, sample_a) = iv(frame.power[0])?;
         let (b, sample_b) = iv(frame.power[1])?;
-        let temperatures = match (
+        let mut temperatures = match (
             temperature(frame.temperatures[0])?,
             temperature(frame.temperatures[1])?,
         ) {
@@ -1213,9 +1462,18 @@ impl Frame {
             }
             _ => None,
         };
+        if matches!(input_profile, InputProfile::Modes { track_tf: true }) {
+            let tf = frame.temperatures[2];
+            if let (Some(stages), Quality::Measured, Some(at)) =
+                (&mut temperatures, tf.quality, tf.read_started_ns)
+            {
+                stages.measured_at = stages.measured_at.min(Duration::from_nanos(at));
+            }
+        }
         let samples = [sample_a, sample_b];
         Ok(Self {
             seq,
+            scheduled_ns: frame.scheduled_ns,
             monitor: MonitorInput {
                 monotonic: now,
                 wall_time_s: quantity(Seconds::new(frame.wall_time_s), "wall_time_s")?,
@@ -1240,9 +1498,13 @@ impl Frame {
                 now: seconds(now),
                 dt: seconds(Duration::from_nanos(frame.dt_ns)),
             },
-            thermal: a1.then_some(a1::ThermalInput {
+            thermal: (input_profile != InputProfile::M6).then_some(a1::ThermalInput {
                 temperatures: frame.temperatures,
                 step: frame.a1_step_v1,
+            }),
+            mode: modes.then(|| modes::ModeInput {
+                demand: frame.demand,
+                step: frame.mode_step_v1.clone(),
             }),
         })
     }
@@ -1346,6 +1608,7 @@ struct CompareJournal<'a> {
     op: &'a Operation,
     next: usize,
     issue: Option<Diagnostic>,
+    observation_faulted: bool,
 }
 impl<'a> CompareJournal<'a> {
     fn new(op: &'a Operation) -> Self {
@@ -1353,6 +1616,7 @@ impl<'a> CompareJournal<'a> {
             op,
             next: 0,
             issue: None,
+            observation_faulted: false,
         }
     }
     fn finish(self) -> Result<(), Diagnostic> {
@@ -1374,18 +1638,21 @@ impl SafetyJournal for CompareJournal<'_> {
                     state,
                     faults,
                     warnings,
-                } => Event::Observation {
-                    at_ns: at.as_nanos() as u64,
-                    state: state_name(state),
-                    faults: faults.iter().copied().map(fault_issue).collect(),
-                    warnings: warnings
-                        .iter()
-                        .map(|warning| match warning {
-                            Warning::HeadApproaching => "head_approaching",
-                            Warning::MeasurementStale => "measurement_stale",
-                        })
-                        .collect(),
-                },
+                } => {
+                    self.observation_faulted = !faults.is_empty();
+                    Event::Observation {
+                        at_ns: at.as_nanos() as u64,
+                        state: state_name(state),
+                        faults: faults.iter().copied().map(fault_issue).collect(),
+                        warnings: warnings
+                            .iter()
+                            .map(|warning| match warning {
+                                Warning::HeadApproaching => "head_approaching",
+                                Warning::MeasurementStale => "measurement_stale",
+                            })
+                            .collect(),
+                    }
+                }
                 SafetyRecord::Operator { at, action } => Event::Operator {
                     at_ns: at.as_nanos() as u64,
                     action: match action {
@@ -1814,7 +2081,7 @@ mod tests {
             sample.read_finished_ns = Some(159 + 5 * index as u64);
         }
         raw.a1_step_v1.as_mut().unwrap().heater_energy_j = [0.01, 0.02];
-        Frame::from_raw(1, &raw, true).unwrap()
+        Frame::from_raw(1, &raw, InputProfile::A1).unwrap()
     }
 
     fn plotting_inputs() -> Inputs<'static> {
@@ -1881,6 +2148,7 @@ mod tests {
                     mass_kg: None,
                 }),
             }),
+            mode_step_v1: None,
         }
     }
 }

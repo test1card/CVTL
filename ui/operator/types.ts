@@ -1,13 +1,56 @@
 export type Theme = "light" | "dark";
 export type ThermalNode = "stage1" | "stage2" | "tf" | "jacket";
 export type OutputState = "unknown" | "off_verified" | "on_verified";
+export type BodyPort = "stage2" | "tf";
 export type BridgeSetup =
   | { kind: "constant"; conductance_w_per_k: number }
   | { kind: "conductor"; material: string; area_m2: number; length_m: number }
   | { kind: "table"; points: [number, number][] }
   | { kind: "series"; contact_w_per_k: number; material: string; area_m2: number; length_m: number };
 
+export type ModeSetup =
+  | { kind: "observe" }
+  | { kind: "constant"; power_w: number }
+  | { kind: "power_profile"; points: { elapsed_ms: number; power_w: number }[] }
+  | { kind: "temperature_hold"; setpoint_k: number }
+  | { kind: "virtual_body"; port: BodyPort; body_heat_w: number; compensation?: { fixture_parasitic_w?: number } };
+
+export type ModeKind = ModeSetup["kind"];
+export type ModeChoice = ModeKind | "a1" | "compensation";
+
+export const modeLabels: Record<ModeChoice, string> = {
+  a1: "Виртуальное тело (A1)",
+  observe: "Наблюдение",
+  constant: "Постоянная мощность",
+  power_profile: "Профиль мощности P(t)",
+  temperature_hold: "Удержание stage2",
+  virtual_body: "Виртуальное тело",
+  compensation: "Компенсация насадки (test_only)",
+};
+
+export function modeChoice(mode?: ModeSetup): ModeChoice {
+  return mode?.kind === "virtual_body" && mode.compensation ? "compensation" : mode?.kind ?? "a1";
+}
+
+export const bridgeLabels: Record<BridgeSetup["kind"], string> = {
+  constant: "Постоянный G",
+  conductor: "Проводник",
+  table: "Таблица G(T)",
+  series: "Контакт и проводник",
+};
+
+export const resultReasons: Record<string, string> = {
+  compensation_missing_tf: "Нет пригодного измерения tf",
+  compensation_pair_not_ready: "Нет двух последовательных свежих измерений tf",
+  compensation_fixture_invalid: "Теплоёмкость насадки не определяется при текущем tf",
+  port_unavailable: "Нет пригодного измерения порта",
+  body_edit_invalid_at_tick: "Параметры неприменимы при текущих температурах тела и порта",
+  negative_request: "Запрошена отрицательная мощность",
+  operator_stop: "Остановлено оператором",
+};
+
 export interface Setup {
+  mode?: ModeSetup;
   body: {
     material: string;
     mass_kg: number;
@@ -81,6 +124,7 @@ export interface Estimate {
   wiring: { from: ThermalNode; to: ThermalNode; heat_from_w: number; heat_to_w: number; source: string }[];
   wire_heat_by_node_w: [number, number, number, number];
   fixture_capacity_j_per_k: number;
+  compensation?: { fixture_parasitic_w: number; fixture_capacity_j_per_k: number };
   limits: Limits;
 }
 
@@ -88,6 +132,8 @@ export interface ChangePayload {
   mass_kg?: number;
   scale?: number;
   g_w_per_k?: number;
+  material?: string;
+  bridge?: BridgeSetup;
 }
 
 export interface AppliedChange {
@@ -98,6 +144,26 @@ export interface AppliedChange {
   temperature_before_k: number;
   temperature_after_k: number;
 }
+
+export type ModeChange = {
+  request: ChangePayload;
+  outcome:
+    | { status: "applied"; temperature_before_k: number; temperature_after_k: number; dh_event_j: number | null }
+    | { status: "rejected" };
+};
+
+export type ModeCompensation =
+  | {
+      status: "ready";
+      previous_tf_k: number;
+      previous_read_started_ns: number;
+      current_tf_k: number;
+      current_read_started_ns: number;
+      d_tf_k_per_s: number;
+      fixture_capacity_j_per_k: number;
+      fixture_parasitic_w: number;
+    }
+  | { status: "unavailable"; reason: "missing_tf" | "pair_not_ready" | "fixture_invalid" };
 
 export interface TimelineSample {
   tick: number;
@@ -117,6 +183,14 @@ export interface TimelineSample {
   current_limited: boolean;
   equivalence: string | null;
   change: AppliedChange | null;
+  mode_v1?: {
+    kind: ModeKind;
+    hold_setpoint_k?: number | null;
+    port?: BodyPort | null;
+    held_age_ns?: number | null;
+    compensation?: ModeCompensation | null;
+    change?: ModeChange | null;
+  };
 }
 
 export interface RunView {
@@ -132,14 +206,18 @@ export interface RunView {
   observation_clear: boolean;
   journal: "opening" | "recording" | "closing" | "completed" | "failed" | "timed_out";
   archive_error: string | null;
+  mode?: ModeSetup;
+  compensation_ready?: boolean;
+  off_reason?: string | null;
   resistance_ohms: [number, number];
   measured_resistance_ohms: [number | null, number | null];
   estimate: Estimate;
-  parameters: { mass_kg: number; scale: number; g_w_per_k: number | null };
+  parameters: { mass_kg: number; scale: number; g_w_per_k: number | null; material?: string; bridge?: BridgeSetup } | null;
   samples: TimelineSample[];
   samples_seen: number;
   events: { seq: number; kind: string; at_ns: number; code: string }[];
   last_change: { tick: number; seq: number; change: AppliedChange } | null;
+  last_mode_change?: { tick: number; seq: number; change: ModeChange; reason?: string };
 }
 
 export interface DaemonState {
@@ -209,6 +287,8 @@ export interface ArchiveReview {
     output_state_at_boundary: OutputState;
     first_diagnostic: { status: string; seq: number; message: string } | null;
     a1?: { thermal_steps: number; last_interval_end_ns: number | null };
+    mode?: ModeKind;
+    fixture_compensation?: true;
   };
   samples: TimelineSample[];
   last_verified_seq: number;

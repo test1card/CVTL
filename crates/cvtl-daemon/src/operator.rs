@@ -33,10 +33,14 @@ use cvtl_safety::{
 use cvtl_sim::{
     keithley::KeithleySimulator,
     lakeshore::LakeShoreSim,
+    modes::{BodyEdit, ModeSetup},
     recording::{test_only_control_config, RecordingLoop, PERIOD},
 };
 use cvtl_store::{
-    record::{A1ChangeV1, Correlation, Event, Inputs, Quality},
+    record::{
+        A1ChangeV1, Correlation, Event, Inputs, ModeBodyChangeV1, ModeChangeOutcomeV1,
+        ModeCompensationIssue, ModeCompensationV1, Quality,
+    },
     session::{fault_issue, CloseResult, Receipt},
 };
 use serde::{Deserialize, Serialize};
@@ -66,20 +70,12 @@ pub(crate) struct ActionRequest {
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 enum Action {
     Arm,
-    Start {
-        confirmed: bool,
-    },
+    Start { confirmed: bool },
     Recover,
-    Reset {
-        confirmed: bool,
-    },
+    Reset { confirmed: bool },
     Stop,
     Fault,
-    Change {
-        mass_kg: Option<f64>,
-        scale: Option<f64>,
-        g_w_per_k: Option<f64>,
-    },
+    Change(BodyEdit),
 }
 
 enum Command {
@@ -216,11 +212,63 @@ struct AppliedChange {
     change: A1ChangeV1,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Serialize)]
+struct ModeChange {
+    tick: u64,
+    seq: u64,
+    change: ModeBodyChangeV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+#[derive(Clone, Serialize)]
 struct EffectiveParameters {
     mass_kg: f64,
     scale: f64,
     g_w_per_k: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    material: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bridge: Option<BridgeSetup>,
+}
+
+impl EffectiveParameters {
+    fn new(body: &BodySetup, explicit: bool) -> Self {
+        Self {
+            mass_kg: body.mass_kg,
+            scale: body.scale,
+            g_w_per_k: constant_conductance(&body.bridge),
+            material: explicit.then(|| body.material.clone()),
+            bridge: explicit.then(|| body.bridge.clone()),
+        }
+    }
+
+    fn apply(&mut self, edit: BodyEdit) {
+        self.mass_kg = edit.mass_kg.unwrap_or(self.mass_kg);
+        self.scale = edit.scale.unwrap_or(self.scale);
+        if let Some(material) = edit.material {
+            self.material = Some(material);
+        }
+        let bridge = edit.bridge.or_else(|| {
+            edit.g_w_per_k
+                .map(|conductance_w_per_k| BridgeSetup::Constant {
+                    conductance_w_per_k,
+                })
+        });
+        if let Some(bridge) = bridge {
+            self.g_w_per_k = constant_conductance(&bridge);
+            self.bridge = Some(bridge);
+        }
+    }
+}
+
+fn constant_conductance(bridge: &BridgeSetup) -> Option<f64> {
+    match *bridge {
+        BridgeSetup::Constant {
+            conductance_w_per_k,
+        } => Some(conductance_w_per_k),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -240,11 +288,19 @@ pub(crate) struct RunView {
     resistance_ohms: [f64; 2],
     measured_resistance_ohms: [Option<f64>; 2],
     estimate: Estimate,
-    parameters: EffectiveParameters,
+    parameters: Option<EffectiveParameters>,
     samples_seen: u64,
     samples: VecDeque<TimelineSample>,
     events: VecDeque<RunEvent>,
     last_change: Option<AppliedChange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<ModeSetup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compensation_ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    off_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_mode_change: Option<ModeChange>,
 }
 
 #[derive(Serialize)]
@@ -327,11 +383,14 @@ impl Drop for Operator {
 }
 
 struct Projection {
-    parameters: EffectiveParameters,
+    parameters: Option<EffectiveParameters>,
+    mode: Option<ModeSetup>,
     samples_seen: u64,
     samples: VecDeque<TimelineSample>,
     events: VecDeque<RunEvent>,
     last_change: Option<AppliedChange>,
+    last_mode_change: Option<ModeChange>,
+    off_reason: Option<String>,
     readings: Option<Readings>,
     observation_clear: bool,
 }
@@ -344,23 +403,22 @@ struct Readings {
 }
 
 impl Projection {
-    fn new(body: &BodySetup) -> Self {
-        let g_w_per_k = match body.bridge {
-            BridgeSetup::Constant {
-                conductance_w_per_k,
-            } => Some(conductance_w_per_k),
-            _ => None,
-        };
+    fn new(setup: &Setup) -> Self {
         Self {
-            parameters: EffectiveParameters {
-                mass_kg: body.mass_kg,
-                scale: body.scale,
-                g_w_per_k,
+            parameters: match setup.mode {
+                None => Some(EffectiveParameters::new(&setup.body, false)),
+                Some(ModeSetup::VirtualBody { .. }) => {
+                    Some(EffectiveParameters::new(&setup.body, true))
+                }
+                _ => None,
             },
+            mode: setup.mode.clone(),
             samples_seen: 0,
             samples: VecDeque::new(),
             events: VecDeque::new(),
             last_change: None,
+            last_mode_change: None,
+            off_reason: None,
             readings: None,
             observation_clear: false,
         }
@@ -405,8 +463,21 @@ impl Projection {
                         self.event(seq, "control", *at_ns, code);
                     }
                 }
-                Event::Operator { at_ns, action } => self.event(seq, "operator", *at_ns, action),
-                Event::OutputEvidence { at_ns, state, .. } => {
+                Event::Operator { at_ns, action } => {
+                    if self.mode.is_some() && *action == "stop" {
+                        self.off_reason = Some("operator_stop".into());
+                    }
+                    self.event(seq, "operator", *at_ns, action);
+                }
+                Event::OutputEvidence {
+                    at_ns,
+                    state,
+                    fault,
+                    ..
+                } => {
+                    if self.mode.is_some() {
+                        self.output(receipt.correlation, state, *fault);
+                    }
                     self.event(seq, "output_evidence", *at_ns, state)
                 }
                 _ => {}
@@ -449,19 +520,80 @@ impl Projection {
         });
 
         if let Correlation::Tick(tick) = correlation {
-            let sample = TimelineSample::from_inputs(tick, seq, frame);
-            if let Some(change) = sample.change {
-                self.parameters.mass_kg = change.mass_kg.unwrap_or(self.parameters.mass_kg);
-                self.parameters.scale = change.scale.unwrap_or(self.parameters.scale);
-                self.parameters.g_w_per_k = change.bridge_w_per_k.or(self.parameters.g_w_per_k);
+            let mut sample = TimelineSample::from_inputs(tick, seq, frame);
+            if let Some(mode) = &self.mode {
+                sample.apply_operator_mode(mode, frame.mode_step_v1.as_ref());
+            }
+            if let (Some(change), Some(parameters)) = (sample.change, self.parameters.as_mut()) {
+                parameters.mass_kg = change.mass_kg.unwrap_or(parameters.mass_kg);
+                parameters.scale = change.scale.unwrap_or(parameters.scale);
+                parameters.g_w_per_k = change.bridge_w_per_k.or(parameters.g_w_per_k);
                 self.last_change = Some(AppliedChange { tick, seq, change });
                 self.event(seq, "parameters", frame.measured_ns, "applied");
+            }
+            if let Some(mode) = &sample.mode_v1 {
+                if let Some(change) = &mode.change {
+                    let reason = match change.outcome {
+                        ModeChangeOutcomeV1::Applied { .. } => {
+                            if let (Some(parameters), Ok(edit)) = (
+                                self.parameters.as_mut(),
+                                serde_json::from_value(change.request.clone()),
+                            ) {
+                                parameters.apply(edit);
+                            }
+                            None
+                        }
+                        ModeChangeOutcomeV1::Rejected => {
+                            Some(compensation_issue(mode.compensation).unwrap_or(
+                                if !frame.model_valid || sample.bridge_flow_w.is_some() {
+                                    "body_edit_invalid_at_tick"
+                                } else {
+                                    "port_unavailable"
+                                },
+                            ))
+                        }
+                    };
+                    self.last_mode_change = Some(ModeChange {
+                        tick,
+                        seq,
+                        change: change.clone(),
+                        reason,
+                    });
+                    self.event(
+                        seq,
+                        "parameters",
+                        frame.measured_ns,
+                        reason.unwrap_or("applied"),
+                    );
+                }
             }
             self.samples_seen = self.samples_seen.saturating_add(1);
             if self.samples.len() == TIMELINE_LIMIT {
                 self.samples.pop_front();
             }
             self.samples.push_back(sample);
+        }
+    }
+
+    fn output(&mut self, correlation: Correlation, state: &str, fault: Option<&str>) {
+        if state == "on_verified" {
+            self.off_reason = None;
+        } else if let Some(fault) = fault {
+            self.off_reason = Some(fault.to_owned());
+        } else if let Some(sample) = self
+            .samples
+            .back()
+            .filter(|sample| correlation == Correlation::Tick(sample.tick))
+        {
+            let reason =
+                compensation_issue(sample.mode_v1.as_ref().and_then(|mode| mode.compensation))
+                    .or_else(|| {
+                        sample
+                            .requested_w
+                            .is_some_and(|power| power < 0.0)
+                            .then_some("negative_request")
+                    });
+            self.off_reason = reason.map(str::to_owned);
         }
     }
 
@@ -476,6 +608,17 @@ impl Projection {
             code: code.into(),
         });
     }
+}
+
+fn compensation_issue(compensation: Option<ModeCompensationV1>) -> Option<&'static str> {
+    let ModeCompensationV1::Unavailable { reason } = compensation? else {
+        return None;
+    };
+    Some(match reason {
+        ModeCompensationIssue::MissingTf => "compensation_missing_tf",
+        ModeCompensationIssue::PairNotReady => "compensation_pair_not_ready",
+        ModeCompensationIssue::FixtureInvalid => "compensation_fixture_invalid",
+    })
 }
 
 fn oldest<const N: usize>(times: [Option<u64>; N]) -> Option<u64> {
@@ -525,7 +668,8 @@ impl ActiveRun<'_> {
             && self.recording.output_state() == OutputState::OffVerified
             && source
             && thermometer
-            && clear;
+            && clear
+            && self.recording.compensation_ready();
         (ready, source, thermometer, clear)
     }
 
@@ -559,11 +703,22 @@ impl ActiveRun<'_> {
                 [None; 2]
             },
             estimate: self.prepared.estimate.clone(),
-            parameters: projection.parameters,
+            parameters: projection.parameters.clone(),
             samples_seen: projection.samples_seen,
             samples: projection.samples.clone(),
             events: projection.events.clone(),
             last_change: projection.last_change,
+            mode: projection.mode.clone(),
+            compensation_ready: matches!(
+                projection.mode,
+                Some(ModeSetup::VirtualBody {
+                    compensation: Some(_),
+                    ..
+                })
+            )
+            .then(|| self.recording.compensation_ready()),
+            off_reason: projection.off_reason.clone(),
+            last_mode_change: projection.last_mode_change.clone(),
         });
         let mut shared = shared.lock().unwrap();
         if matches!(self.journal, "completed" | "failed" | "timed_out") {
@@ -597,23 +752,32 @@ impl ActiveRun<'_> {
                 self.source.disconnect_next_query();
                 return Ok(());
             }
-            Action::Change {
-                mass_kg,
-                scale,
-                g_w_per_k,
-            } => {
+            Action::Change(edit) => {
                 if self.recording.state() != MachineState::Running {
                     return Err("Смена параметров доступна во время прогона".into());
                 }
-                let mass = mass_kg
+                if self.prepared.setup.mode.is_some() {
+                    return self
+                        .recording
+                        .change_operator_body(edit)
+                        .map_err(|error| error.to_string());
+                }
+                if edit.material.is_some() || edit.bridge.is_some() {
+                    return Err(
+                        "Смена материала или типа моста доступна в режиме виртуального тела".into(),
+                    );
+                }
+                let mass = edit
+                    .mass_kg
                     .map(|value| Kilograms::new(value).ok_or("Недопустимая масса"))
                     .transpose()?;
-                let bridge = g_w_per_k
+                let bridge = edit
+                    .g_w_per_k
                     .map(|value| WattsPerKelvin::new(value).ok_or("Недопустимая проводимость"))
                     .transpose()?;
                 return self
                     .recording
-                    .change_a1_parameters(mass, scale, bridge)
+                    .change_a1_parameters(mass, edit.scale, bridge)
                     .map_err(|error| error.to_string());
             }
             Action::Start { confirmed: false } | Action::Reset { confirmed: false } => {
@@ -779,16 +943,22 @@ fn run_session(
     let source = KeithleySimulator::start().map_err(|error| error.to_string())?;
     let thermometer = LakeShoreSim::spawn().map_err(|error| error.to_string())?;
     let epoch = Instant::now();
-    let mut recording = RecordingLoop::new_a1_configured(
-        &source,
-        &thermometer,
-        &id,
-        runs.join(&id),
-        epoch,
-        &prepared.setup.body,
-    )
+    let path = runs.join(&id);
+    let mut recording = match prepared.setup.mode_snapshot()? {
+        Some(snapshot) => {
+            RecordingLoop::new_operator_mode(&source, &thermometer, &id, path, epoch, snapshot)
+        }
+        None => RecordingLoop::new_a1_configured(
+            &source,
+            &thermometer,
+            &id,
+            path,
+            epoch,
+            &prepared.setup.body,
+        ),
+    }
     .map_err(|error| error.to_string())?;
-    let projection = Rc::new(RefCell::new(Projection::new(&prepared.setup.body)));
+    let projection = Rc::new(RefCell::new(Projection::new(&prepared.setup)));
     let observed = Rc::clone(&projection);
     recording
         .observe_accepted(move |receipt, events| observed.borrow_mut().accept(receipt, events));

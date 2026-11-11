@@ -15,6 +15,7 @@
 //   keithley - loopback power source
 //   lakeshore - loopback thermometer
 //   maisheng - in-memory test-only source interface
+//   modes - shared test-only mode settings and demand calculation
 //   power_loop - deterministic test plant
 //   recording - simulation owner and journal
 // END_MODULE_MAP
@@ -27,5 +28,6 @@ pub mod keithley;
 pub mod lakeshore;
 mod loopback;
 pub mod maisheng;
+pub mod modes;
 pub mod power_loop;
 pub mod recording;

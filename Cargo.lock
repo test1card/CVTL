@@ -248,6 +248,7 @@ dependencies = [
  "cvtl-safety",
  "cvtl-store",
  "serde",
+ "serde_json",
  "sha2",
  "yaml_serde",
 ]

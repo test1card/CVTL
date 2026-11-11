@@ -20,6 +20,8 @@ use std::{
     sync::Arc,
 };
 
+use cvtl_sim::modes::BodyPort;
+use cvtl_store::record::{ModeBodyChangeV1, ModeChangeOutcomeV1, ModeCompensationV1};
 use parquet::{
     basic::Compression,
     column::writer::ColumnWriterImpl,
@@ -32,7 +34,7 @@ use parquet::{
     schema::parser::parse_message_type,
 };
 
-use crate::replay::TimelineSample;
+use crate::replay::{ModeTimelineSample, TimelineSample};
 
 pub(super) const CSV: &str = "ticks.csv";
 pub(super) const PARQUET: &str = "ticks.parquet";
@@ -40,6 +42,7 @@ const ROW_GROUP_ROWS: usize = 256;
 
 enum Column {
     Unsigned(&'static str, fn(&TimelineSample) -> u64),
+    OptionalUnsigned(&'static str, fn(&TimelineSample) -> Option<u64>),
     Double(&'static str, fn(&TimelineSample) -> Option<f64>),
     Flag(&'static str, fn(&TimelineSample) -> Option<bool>),
     Text(&'static str, fn(&TimelineSample) -> Option<&str>),
@@ -71,22 +74,54 @@ const COLUMNS: &[Column] = &[
     Column::Double("bridge_flow_w", |row| row.bridge_flow_w),
     Column::Double("tracking_error_w", |row| row.tracking_error_w),
     Column::Double("changed_mass_kg", |row| {
-        row.change.and_then(|change| change.mass_kg)
+        row.change
+            .and_then(|change| change.mass_kg)
+            .or_else(|| applied_change(row)?.request["mass_kg"].as_f64())
     }),
     Column::Double("changed_scale", |row| {
-        row.change.and_then(|change| change.scale)
+        row.change
+            .and_then(|change| change.scale)
+            .or_else(|| applied_change(row)?.request["scale"].as_f64())
     }),
     Column::Double("changed_bridge_w_per_k", |row| {
-        row.change.and_then(|change| change.bridge_w_per_k)
+        row.change
+            .and_then(|change| change.bridge_w_per_k)
+            .or_else(|| {
+                let request = &applied_change(row)?.request;
+                request["g_w_per_k"]
+                    .as_f64()
+                    .or_else(|| request["bridge"]["conductance_w_per_k"].as_f64())
+            })
     }),
     Column::Double("dh_event_j", |row| {
-        row.change.and_then(|change| change.dh_event_j)
+        row.change.and_then(|change| change.dh_event_j).or_else(|| {
+            match applied_change(row)?.outcome {
+                ModeChangeOutcomeV1::Applied { dh_event_j, .. } => dh_event_j,
+                ModeChangeOutcomeV1::Rejected => None,
+            }
+        })
     }),
     Column::Double("temperature_before_change_k", |row| {
-        row.change.map(|change| change.temperature_before_k)
+        row.change
+            .map(|change| change.temperature_before_k)
+            .or_else(|| match applied_change(row)?.outcome {
+                ModeChangeOutcomeV1::Applied {
+                    temperature_before_k,
+                    ..
+                } => Some(temperature_before_k),
+                ModeChangeOutcomeV1::Rejected => None,
+            })
     }),
     Column::Double("temperature_after_change_k", |row| {
-        row.change.map(|change| change.temperature_after_k)
+        row.change
+            .map(|change| change.temperature_after_k)
+            .or_else(|| match applied_change(row)?.outcome {
+                ModeChangeOutcomeV1::Applied {
+                    temperature_after_k,
+                    ..
+                } => Some(temperature_after_k),
+                ModeChangeOutcomeV1::Rejected => None,
+            })
     }),
     Column::Flag("slew_limited", |row| {
         row.equivalence.as_ref().map(|_| row.slew_limited)
@@ -100,10 +135,68 @@ const COLUMNS: &[Column] = &[
     Column::Text("equivalence", |row| row.equivalence.as_deref()),
 ];
 
+const MODE_COLUMNS: &[Column] = &[
+    Column::Text("mode", |row| Some(row.mode_v1.as_ref()?.kind)),
+    Column::Double("hold_setpoint_k", |row| {
+        row.mode_v1.as_ref()?.hold_setpoint_k
+    }),
+    Column::Text("body_port", |row| {
+        Some(match row.mode_v1.as_ref()?.port? {
+            BodyPort::Stage2 => "stage2",
+            BodyPort::Tf => "tf",
+        })
+    }),
+    Column::OptionalUnsigned("held_age_ns", |row| row.mode_v1.as_ref()?.held_age_ns),
+    Column::Double("d_tf_k_per_s", |row| {
+        match row.mode_v1.as_ref()?.compensation? {
+            ModeCompensationV1::Ready { d_tf_k_per_s, .. } => Some(d_tf_k_per_s),
+            ModeCompensationV1::Unavailable { .. } => None,
+        }
+    }),
+    Column::Double("fixture_capacity_j_per_k", |row| {
+        match row.mode_v1.as_ref()?.compensation? {
+            ModeCompensationV1::Ready {
+                fixture_capacity_j_per_k,
+                ..
+            } => Some(fixture_capacity_j_per_k),
+            ModeCompensationV1::Unavailable { .. } => None,
+        }
+    }),
+    Column::Double("fixture_parasitic_w", |row| {
+        match row.mode_v1.as_ref()?.compensation? {
+            ModeCompensationV1::Ready {
+                fixture_parasitic_w,
+                ..
+            } => Some(fixture_parasitic_w),
+            ModeCompensationV1::Unavailable { .. } => None,
+        }
+    }),
+    Column::Text("changed_material", |row| {
+        row.mode_v1
+            .as_ref()
+            .and_then(ModeTimelineSample::changed_material)
+    }),
+    Column::Text("changed_bridge_json", |row| {
+        row.mode_v1.as_ref()?.changed_bridge_json.as_deref()
+    }),
+];
+
+fn applied_change(row: &TimelineSample) -> Option<&ModeBodyChangeV1> {
+    let change = row.mode_v1.as_ref()?.change.as_ref()?;
+    matches!(change.outcome, ModeChangeOutcomeV1::Applied { .. }).then_some(change)
+}
+
+fn columns(operator_modes: bool) -> impl Iterator<Item = &'static Column> {
+    COLUMNS
+        .iter()
+        .chain(if operator_modes { MODE_COLUMNS } else { &[] })
+}
+
 impl Column {
     fn name(&self) -> &'static str {
         match self {
             Self::Unsigned(name, _)
+            | Self::OptionalUnsigned(name, _)
             | Self::Double(name, _)
             | Self::Flag(name, _)
             | Self::Text(name, _) => name,
@@ -113,6 +206,7 @@ impl Column {
     fn parquet_declaration(&self, schema: &mut String) {
         let (physical, annotation) = match self {
             Self::Unsigned(..) => ("REQUIRED INT64 ", " (INTEGER(64,false))"),
+            Self::OptionalUnsigned(..) => ("OPTIONAL INT64 ", " (INTEGER(64,false))"),
             Self::Double(..) => ("OPTIONAL DOUBLE ", ""),
             Self::Flag(..) => ("OPTIONAL BOOLEAN ", ""),
             Self::Text(..) => ("OPTIONAL BINARY ", " (STRING)"),
@@ -126,6 +220,7 @@ impl Column {
     fn write_csv(&self, output: &mut impl Write, row: &TimelineSample) -> io::Result<()> {
         match self {
             Self::Unsigned(_, read) => write!(output, "{}", read(row)),
+            Self::OptionalUnsigned(_, read) => write_csv_value(output, read(row)),
             Self::Double(_, read) => write_csv_value(output, read(row)),
             Self::Flag(_, read) => write_csv_value(output, read(row)),
             Self::Text(_, read) => match read(row) {
@@ -145,15 +240,16 @@ impl Column {
     ) -> ParquetResult<()> {
         match self {
             Self::Unsigned(_, read) => {
-                let values: Vec<_> = rows
-                    .iter()
-                    .map(|row| i64::from_ne_bytes(read(row).to_ne_bytes()))
-                    .collect();
+                let values: Vec<_> = rows.iter().map(|row| parquet_unsigned(read(row))).collect();
                 output
                     .typed::<Int64Type>()
                     .write_batch(&values, None, None)?;
                 Ok(())
             }
+            Self::OptionalUnsigned(_, read) => write_nullable(
+                output.typed::<Int64Type>(),
+                rows.iter().map(|row| read(row).map(parquet_unsigned)),
+            ),
             Self::Double(_, read) => {
                 write_nullable(output.typed::<DoubleType>(), rows.iter().map(read))
             }
@@ -166,6 +262,10 @@ impl Column {
             ),
         }
     }
+}
+
+fn parquet_unsigned(value: u64) -> i64 {
+    i64::from_ne_bytes(value.to_ne_bytes())
 }
 
 fn write_csv_value(output: &mut impl Write, value: Option<impl Display>) -> io::Result<()> {
@@ -193,21 +293,21 @@ pub(super) struct Tables {
     csv: BufWriter<File>,
     parquet: SerializedFileWriter<File>,
     batch: Vec<TimelineSample>,
+    operator_modes: bool,
     rows: u64,
 }
 
 impl Tables {
-    pub(super) fn open(dir: &Path) -> Result<Self, String> {
+    pub(super) fn open(dir: &Path, operator_modes: bool) -> Result<Self, String> {
         let mut csv = BufWriter::new(File::create_new(dir.join(CSV)).map_err(table_error)?);
-        let header = COLUMNS
-            .iter()
+        let header = columns(operator_modes)
             .map(Column::name)
             .collect::<Vec<_>>()
             .join(",");
         writeln!(csv, "{header}").map_err(table_error)?;
 
         let mut schema = String::from("message cvtl_tick {\n");
-        for column in COLUMNS {
+        for column in columns(operator_modes) {
             column.parquet_declaration(&mut schema);
         }
         schema.push('}');
@@ -224,12 +324,13 @@ impl Tables {
             csv,
             parquet,
             batch: Vec::with_capacity(ROW_GROUP_ROWS),
+            operator_modes,
             rows: 0,
         })
     }
 
     pub(super) fn push(&mut self, sample: TimelineSample) -> Result<(), String> {
-        for (index, column) in COLUMNS.iter().enumerate() {
+        for (index, column) in columns(self.operator_modes).enumerate() {
             if index > 0 {
                 self.csv.write_all(b",").map_err(table_error)?;
             }
@@ -248,7 +349,7 @@ impl Tables {
 
     fn flush_group(&mut self) -> ParquetResult<()> {
         let mut group = self.parquet.next_row_group()?;
-        for column in COLUMNS {
+        for column in columns(self.operator_modes) {
             let mut writer = group
                 .next_column()?
                 .expect("schema and columns share one definition");
@@ -316,7 +417,7 @@ mod tests {
     #[test]
     fn tables_preserve_unsigned_values_nulls_and_row_group_bounds() {
         let directory = TestDirectory::new();
-        let mut tables = Tables::open(&directory.0).unwrap();
+        let mut tables = Tables::open(&directory.0, false).unwrap();
         let first = TimelineSample {
             tick: (1 << 53) + 1,
             seq: u64::MAX,
@@ -335,6 +436,7 @@ mod tests {
             current_limited: false,
             equivalence: Some(String::new()),
             change: None,
+            mode_v1: None,
         };
         tables.push(first.clone()).unwrap();
         let mut missing = first;
@@ -409,7 +511,10 @@ mod tests {
     #[test]
     fn empty_export_has_a_csv_header_and_a_parquet_schema() {
         let directory = TestDirectory::new();
-        assert_eq!(Tables::open(&directory.0).unwrap().finish().unwrap(), 0);
+        assert_eq!(
+            Tables::open(&directory.0, false).unwrap().finish().unwrap(),
+            0
+        );
         let csv = fs::read_to_string(directory.0.join(CSV)).unwrap();
         assert_eq!(csv.lines().count(), 1);
         assert_eq!(csv.trim_end().split(',').count(), COLUMNS.len());

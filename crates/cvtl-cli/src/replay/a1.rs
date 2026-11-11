@@ -326,7 +326,7 @@ impl ThermalReplay {
     }
 }
 
-fn within_thermal_roundoff(computed: f64, recorded: f64, scale: f64) -> bool {
+pub(super) fn within_thermal_roundoff(computed: f64, recorded: f64, scale: f64) -> bool {
     let magnitude = computed.abs().max(recorded.abs()).max(scale).max(1.0);
     computed.is_finite()
         && recorded.is_finite()

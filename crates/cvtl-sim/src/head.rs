@@ -99,11 +99,40 @@ impl SyntheticHead {
         heater: [Watts; 2],
         cooling: [Watts; 2],
     ) -> Result<(), HeadError> {
+        self.advance_inner(dt, heater, cooling, None)
+    }
+
+    pub(super) fn advance_with_fixture(
+        &mut self,
+        dt: Seconds,
+        heater: [Watts; 2],
+        cooling: [Watts; 2],
+        capacity: JoulesPerKelvin,
+        parasitic: Watts,
+    ) -> Result<(), HeadError> {
+        if capacity.get() <= 0.0 {
+            return Err(HeadError::Parameters);
+        }
+        if parasitic.get() < 0.0 {
+            return Err(HeadError::Power);
+        }
+        self.advance_inner(dt, heater, cooling, Some((capacity, parasitic)))
+    }
+
+    fn advance_inner(
+        &mut self,
+        dt: Seconds,
+        heater: [Watts; 2],
+        cooling: [Watts; 2],
+        fixture: Option<(JoulesPerKelvin, Watts)>,
+    ) -> Result<(), HeadError> {
         let p = self.parameters;
         let [c1, c2, cf] = [
             p.stage1_capacity.get(),
             p.stage2_capacity.get(),
-            p.fixture_capacity.get(),
+            fixture
+                .map_or(p.fixture_capacity, |(capacity, _)| capacity)
+                .get(),
         ];
         let g12 = p.stage_link.get();
         let gf2 = p.fixture_link.get();
@@ -123,10 +152,15 @@ impl SyntheticHead {
         let t = self.temperatures;
         let q12 = g12 * (t.stage1.get() - t.stage2.get());
         let qf2 = gf2 * (t.tf.get() - t.stage2.get());
+        let fixture_power = heater[0].get() + heater[1].get() - qf2;
+        let fixture_power = match fixture {
+            Some((_, parasitic)) => fixture_power + parasitic.get(),
+            None => fixture_power,
+        };
         let next = HeadTemperatures {
             stage1: step(t.stage1, -cooling[0].get() - q12, dt, c1)?,
             stage2: step(t.stage2, -cooling[1].get() + q12 + qf2, dt, c2)?,
-            tf: step(t.tf, heater[0].get() + heater[1].get() - qf2, dt, cf)?,
+            tf: step(t.tf, fixture_power, dt, cf)?,
         };
         self.temperatures = next;
         Ok(())

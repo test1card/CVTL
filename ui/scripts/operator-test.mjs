@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
 
@@ -69,7 +70,16 @@ try {
   const screen = (name) => button(name).click();
   const output = (value) => page.locator(`[data-testid="output-state"][data-state="${value}"]`).waitFor();
   const journal = (value) => page.locator(`[data-testid="journal-state"][data-state="${value}"]`).waitFor();
-  const snapshot = () => page.evaluate(() => fetch("/api/state").then((response) => response.json()));
+  const snapshot = () => page.evaluate(() => fetch("/api/state", { cache: "no-store" }).then((response) => response.json()));
+  async function waitForApi(read, description) {
+    const deadline = performance.now() + 8000;
+    do {
+      const result = await read();
+      if (result) return result;
+      await delay(50);
+    } while (performance.now() < deadline);
+    throw new Error(description);
+  }
   const shot = async (name) => {
     if (screenshotDir) await page.screenshot({ path: resolve(screenshotDir, name + ".png"), fullPage: true });
   };
@@ -298,10 +308,10 @@ try {
   await button("Сбросить аварию").click();
   await page.getByRole("dialog").getByRole("button", { name: "Подтвердить сброс", exact: true }).click();
   await button("Допустить").waitFor();
-  await page.waitForFunction(async () => {
-    const result = await fetch("/api/state").then((response) => response.json());
-    return result.run?.state === "output_off_verified" && result.run.fault === null;
-  });
+  await waitForApi(async () => {
+    const { run } = await snapshot();
+    return run?.state === "output_off_verified" && run.fault === null;
+  }, "Контур не подтвердил сброс аварии");
   await context.setOffline(true);
   await page.getByText("Связь потеряна. Последние данные устарели", { exact: false }).waitFor();
   await context.setOffline(false);
@@ -311,6 +321,102 @@ try {
   await mkdir(resolve(root, "runs", faultRun, "completed.json"));
   await stop();
   await page.getByTestId("archive-error").waitFor();
+
+  const modeRuns = {};
+  async function modeRun(choice, kind, configure = async () => {}) {
+    await screen("Сценарий");
+    const previousId = (await snapshot()).run?.id;
+    const compensating = choice === "compensation";
+    await page.getByLabel("Режим прогона", { exact: true }).selectOption(choice);
+    await configure();
+    await button("Рассчитать прогноз").click();
+    await button("Подготовить прогон").click();
+    await output("off_verified");
+    const id = await waitForApi(async () => {
+      const { run } = await snapshot();
+      return run?.mode?.kind === kind && Boolean(run.mode.compensation) === compensating &&
+        run.id !== previousId && run.writer_ready && run.id;
+    }, `Нет подтверждённого прогона для режима ${choice}`);
+    modeRuns[choice] = id;
+    if (choice === "observe") {
+      await page.getByRole("heading", { name: "Ход опыта", exact: true }).waitFor();
+      await screen("Проверка перед запуском");
+      assert.equal(await button("Допустить").count(), 0);
+      assert.equal(await button("Пуск").count(), 0);
+      await button("К наблюдениям").click();
+    } else {
+      if (compensating) await page.locator('[data-testid="compensation-ready"][data-ready="true"]').waitFor();
+      await start();
+    }
+    const observe = choice === "observe";
+    const sample = await waitForApi(async () => {
+      const { run } = await snapshot();
+      if (run?.id !== id || (observe && run.output_state !== "off_verified")) return false;
+      return run.samples.find((sample) => sample.mode_v1?.kind === kind &&
+        (observe ? sample.requested_w === null && sample.body_k === null : Number.isFinite(sample.requested_w)) &&
+        (!compensating || (sample.mode_v1.compensation?.status === "ready" && Number.isFinite(sample.bridge_flow_w))));
+    }, `Прогон ${id} не записал подтверждённый такт режима ${choice}`);
+    if (observe) assert.equal((await snapshot()).run.output_state, "off_verified");
+    return { id, sample };
+  }
+
+  await modeRun("observe", "observe");
+  await stop();
+  await page.getByTestId("off-reason").getByText("Остановлено оператором").waitFor();
+  await modeRun("constant", "constant", () => page.getByLabel("Задание мощности, Вт").fill("1"));
+  await stop();
+  await modeRun("power_profile", "power_profile", () => page.getByLabel("Мощность точки, Вт").first().fill("0.5"));
+  await stop();
+  await modeRun("temperature_hold", "temperature_hold", () => page.getByLabel("Уставка stage2, К").fill("15.5"));
+  await stop();
+  await modeRun("virtual_body", "virtual_body", () => page.getByLabel("Порт теплового моста").selectOption("stage2"));
+  const liveEdit = page.getByRole("region", { name: "Параметры тела и моста" });
+  await liveEdit.getByLabel("Новый материал").selectOption("al6061_t6");
+  await liveEdit.getByLabel("Изменить мост").check();
+  const bridgeType = liveEdit.getByLabel("Тип теплового моста");
+  await bridgeType.selectOption("conductor");
+  await button("Применить параметры").click();
+  await page.locator('[data-testid="applied-change"][data-seq]').waitFor();
+  const newBody = (await snapshot()).run;
+  assert.equal(newBody.last_mode_change.change.outcome.status, "applied");
+  assert.equal(newBody.parameters.material, "al6061_t6");
+  assert.equal(newBody.parameters.bridge.kind, "conductor");
+  assert.equal(newBody.parameters.g_w_per_k, null);
+  assert.ok(newBody.samples.some((sample) => sample.mode_v1?.port === "stage2"));
+  await liveEdit.getByLabel("Изменить мост").check();
+  await bridgeType.selectOption("table");
+  await liveEdit.getByLabel("Температура точки, К").first().fill("100");
+  await liveEdit.getByLabel("Температура точки, К").last().fill("110");
+  await button("Применить параметры").click();
+  await page.getByRole("alert").waitFor();
+  assert.equal((await snapshot()).run.last_mode_change.seq, newBody.last_mode_change.seq);
+  await stop();
+
+  const { id: compensationRun, sample: compensated } = await modeRun("compensation", "virtual_body", async () => {
+    await page.getByLabel("Паразитный приток насадки, Вт").fill("0.05");
+    await page.getByLabel("Проводимость моста G, Вт/К").fill("0.05");
+  });
+  assert.ok(compensated);
+  assert.equal(compensated.mode_v1.compensation.status, "ready");
+  assert.equal(compensated.mode_v1.port, "tf");
+  assert.notEqual(compensated.requested_w, compensated.bridge_flow_w);
+  await stop();
+  await screen("Разбор");
+  await button("Обновить список").click();
+  await page.getByLabel("Прогон", { exact: true }).selectOption(compensationRun);
+  await button("Проверить реплей").click();
+  const archiveReport = await waitForApi(async () => {
+    const job = await page.evaluate(() => fetch("/api/job", { cache: "no-store" }).then((response) => response.json()));
+    const report = job?.value?.report;
+    return report?.run === compensationRun && report;
+  }, `Реплей не вернул отчёт о прогоне ${compensationRun}`);
+  assert.equal(archiveReport.status, "matched", JSON.stringify(archiveReport.first_diagnostic));
+  await review.getByText("Совпадает", { exact: true }).waitFor();
+  await review.getByText("Компенсация насадки (test_only)", { exact: true }).waitFor();
+  await review.getByText("Холодопроизводительность не определяется при переменной теплоёмкости насадки", { exact: true }).waitFor();
+  const modeArchive = resolve(root, "runs", compensationRun);
+  await execute("cargo", ["run", "--locked", "--quiet", "-p", "cvtl-cli", "--", "export", modeArchive], { timeout: 30000 });
+  assert.ok((await readFile(resolve(modeArchive, "report.html"), "utf8")).includes("ticks.csv"));
 
   assert.deepEqual(pageErrors, []);
   assert.deepEqual(foreignRequests, []);
@@ -328,6 +434,7 @@ try {
     analysis_q2_w: primaryAnalysis.q2_eff_w,
     short_analysis_status: shortAnalysis.status,
     fault_recovery: "unknown → off_verified → reset",
+    mode_runs: modeRuns,
   }, null, 2));
 } finally {
   if (browser) await browser.close();
