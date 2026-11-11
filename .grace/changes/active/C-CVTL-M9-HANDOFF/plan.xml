@@ -1,0 +1,64 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M9-HANDOFF>
+    <IntentSummary>Подготовить комплект Фазы B и индекс сверки физики на базе 748682d. Программа и инструмент работают с сохранёнными данными. Контур управления и допуск к оборудованию остаются в существующих границах.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist><Value>.grace/changes/archive/C-CVTL-M9-SIMULATOR-MODES/plan.xml</Value><Value>docs/M9_A1_ACCEPTANCE.md</Value><Value>docs/M9_RUN_ARTIFACTS.md</Value><Value>M-CVTL-CLI</Value><Value>M-CVTL-SAFETY</Value></MustExist>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist><Value>docs/M9_PHASE_B.md</Value><Value>docs/M9_PHASE_B_REPORT_TEMPLATE.md</Value><Value>docs/M9_PHYSICS_REVIEW.md</Value><Value>tools/phase_b/measure.py</Value><Value>tools/phase_b/test_measure.py</Value><Value>tools/phase_b/example-meta.json</Value><Value>tools/phase_b/example-ticks.csv</Value></MustExist>
+      <MustVerify><Module>M-CVTL-CLI</Module></MustVerify>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="4">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="58">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-CLI /><M-CVTL-PHYSICS /><M-CVTL-ANALYSIS /><M-CVTL-SAFETY /><M-CVTL-INSTRUMENTS /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-CLI /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>tools/phase_b/measure.py</File>
+      <File>tools/phase_b/test_measure.py</File>
+      <File>tools/phase_b/example-meta.json</File>
+      <File>tools/phase_b/example-ticks.csv</File>
+      <File>docs/M9_PHASE_B.md</File>
+      <File>docs/M9_PHASE_B_REPORT_TEMPLATE.md</File>
+      <File>docs/M9_PHYSICS_REVIEW.md</File>
+      <File>docs/STATUS.md</File>
+      <File>.grace/verification/main.xml</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Обработка локальной таблицы стендовых измерений</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала тесты на фиксированном синтетическом входе. Один CLI на стандартной библиотеке Python 3.10+ принимает метаданные JSON и CSV, печатает JSON. Использует только локальные файлы и не меняет входы. Версия 1. Метаданные задают origin.kind (test_only, external или cvtl), origin.description, period_ns, steady_ticks как включительную пару номеров и step с tick и last_tick либо null. Паспорт содержит run_id, host, source, thermometer, transport, load, power_reference, conditions. Незаполненные поля паспорта перечисляются в результате. Для cvtl требуются origin.raw_sha256 и origin.export_sha256. Ссылки на происхождение не заменяют фактический SHA-256 двух прочитанных файлов. Вход CSV является таблицей для обработки и не меняет первичный raw.</Criterion>
+          <Criterion>Версионированный заголовок в порядке tick, scheduled_ns, started_ns, a_sample_ns, b_sample_ns, a_read_started_ns, a_read_finished_ns, b_read_started_ns, b_read_finished_ns, command_sent_ns, command_ack_ns, a_voltage_v, a_current_a, b_voltage_v, b_current_a, target_w, reference_w. Время монотонное в целых нс, I/U/мощность в СИ. tick и два времени старта обязательны и строго возрастают. Другие ячейки могут быть пусты. Проверить конечность чисел и причинный порядок присутствующих отметок чтения A/B и команды. Известная отметка преобразования не позже завершения соответствующего чтения. Неполные строки учитываются в покрытии. Повторы, нарушенный порядок и непригодные поля дают явную диагностику с местом. Пропуски номеров считаются отдельно. Данные не восстанавливаются подстановкой.</Criterion>
+          <Criterion>Покрытие и ближайший ранг для медианы, p95, p99 и максимума по джиттеру смежных тактов, сдвигу чтений A/B, полному циклу от старта до последнего ack, времени от чтения A до ack и от отправки до ack. Отсчёт до отправки команды считается при обеих известных отметках преобразования от старейшей из них. Джиттер равен модулю отклонения фактического интервала от периода. Раздельно посчитать суммы I × U, знаковую среднюю и максимальную абсолютную ошибку относительно независимого эталона и относительно доступной уставки в заданном окне. Каждая метрика содержит число пригодных наблюдений. Для пропуска сохраняется пустое значение.</Criterion>
+          <Criterion>Ступень отмечена номером принятой команды. Время установления отсчитывается от её ack до конца чтения B первого отсчёта в полосе ±2 % после которого весь пригодный ряд до last_tick остаётся в полосе. Обе ветви читаются после ack ступени. Требуются непрерывные номера, известные времена, измеренная мощность и одинаковая положительная целевая мощность. Результаты различают settled, not_settled и insufficient. Синтетика из пяти тактов проверяет I × U, отдельные ошибки по эталону и цели, p99 джиттера 2 мс, сдвиг A/B 3 мс, 9 мс полный цикл, 8 мс чтение A до ack и 2 мс команда до ack. Ступень на такте 2, установление на такте 3 за 99 мс. Отдельные тесты проверяют отсутствующий эталон, пропуск, неверное время, повтор, незавершённый горизонт и детерминизм CLI без изменений исходников.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>python3 -m unittest discover -s tools/phase_b</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>Программа стенда, чек-листы и шаблон отчёта</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Один документ программы с предстартовым и завершающим чек-листами и отдельный заполняемый Markdown-отчёт. Один набор ID во всех разделах. Для шагов указаны исполнитель, обязательные входы, наблюдение, ожидаемое состояние, условие остановки и сохраняемое свидетельство. Зафиксировать версию Ubuntu, прошивки, транспорт и его параметры, бэкенд PyVISA и единственного владельца GPIB. Программа проверяет аппаратный тракт и отсутствие нагрузки до подачи мощности. Измерения выполняет ответственный человек на утверждённой резистивной нагрузке. Штатный CVTL в этом дереве блокирует hardware_enabled. Описи, аппаратные пределы, схема отключения, допуски и заключение об аппаратном допуске остаются незаполненными.</Criterion>
+          <Criterion>В программе есть причинно разделённые команда, ответ, доказательство OFF и резервный путь при Unknown. Проверить обе ветви и карту каналов, четырёхпроводный I × U независимым эталоном, compliance, ступень и тайминги вместе с термометрией, OE, watchdog, независимое отключение, потерю связи и завершение процесса. Reset, Arm и Start раздельны. Для всех групп §10.3 дать ссылку на имеющееся синтетическое свидетельство или стендовый шаг, ожидаемое действие и OFF/Unknown. Указать первоначальные цели §8.4 как ориентиры, реальные пороги заполняет ответственный. Схема столбцов, единицы, происхождение и обработка файлов совпадают с T-001. Шаблон отчёта содержит исходники и хэши, измеренные величины, отклонения, непроверенные действия и подписываемый результат.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>git diff --check</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Карта свидетельств A и A1 и приёмка комплекта</Title>
+        <DependsOn>T-001, T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Индекс покрывает все 15 пунктов GOAL.md с локальными ссылками на источники, уравнения, знаки, версии, условия, команды и фактические результаты. Указать материал и область свойств, dH тела и правок, тепловой мост и проводку, envelope, баланс трёх узлов и холодной границы, искусственные испытания известной мощности и неидентифицируемости. Различать синтетический паспорт, историческую характеристику и реальную головку. Оставить явно открытыми cp(T) Al 1100, неподтверждённые физические параметры, аппаратные транспорты и допуск. Зафиксировать согласованные границы реализации по потоку владельца, оценке проводки в GUI, исторической кривой и отдельному производному экспорту, где текст ТЗ описывает более широкий вариант.</Criterion>
+          <Criterion>На macOS запустить fmt, build, Clippy -D warnings, полный Rust-набор и запуск с конфигом поставки. На macOS и Ubuntu 22.04.5 ARM64 с только lo запустить Python-тесты и пример. Сверить результаты примера и SHA-256 неизменных входов на обеих ОС. Уже принятые двуплатформенные свидетельства M9 сохраняются. Обновить STATUS и привязать офлайн-свидетельства к дереву. Бюджеты команд получены как ceil(4 × максимум) + 1 по трём прогонам существующих команд с максимумами 0,56 с и 14,05 с. Выполнить baseline до исполнения, затем target и свежий final. Для применения требуется независимое точное ревью GPT-6 Astra с общим PASS, гейтом простоты и явным APPLY.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>python3 -m unittest discover -s tools/phase_b</Command><Command>cargo fmt --all -- --check</Command><Command>cargo build --workspace --locked</Command><Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command><Command>cargo test --workspace --locked</Command><Command>cargo run --locked -p cvtl-daemon -- config/simulator.yaml</Command></Verification>
+      </T-003>
+    </ImplementationPlan>
+  </C-CVTL-M9-HANDOFF>
+</GraceChangePlan>
