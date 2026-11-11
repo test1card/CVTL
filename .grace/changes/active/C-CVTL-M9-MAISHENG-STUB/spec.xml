@@ -1,4 +1,4 @@
-<GraceChangeSpec graceVersion="4.0" status="draft">
+<GraceChangeSpec graceVersion="4.0" status="approved">
   <C-CVTL-M9-MAISHENG-STUB>
     <Summary>Закрыть офлайн-заготовку Maisheng MP3001CR2 по ТЗ §6.6 и §9 и ADR 0004.</Summary>
     <Problem>Maisheng предусмотрен двумя неактивными ветвями в конфигурации. ТЗ требует справочный профиль неподтверждённого протокола, безопасную заглушку и синтетический источник для проверки общего интерфейса.</Problem>
