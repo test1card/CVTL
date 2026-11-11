@@ -1,0 +1,72 @@
+<GraceChangePlan graceVersion="4.0" status="draft">
+  <C-CVTL-M9-RUN-ARTIFACTS>
+    <IntentSummary>Один локальный экспорт проверенных тактов и оценки M8 на базе f98fb41. Переиспользовать реплей и анализ CLI. Исполнение после отдельного утверждения плана и чистого baseline.</IntentSummary>
+    <BaselineAssertions>
+      <MustExist><Value>.grace/changes/archive/C-CVTL-M9-REPLAY-PORTABILITY/plan.xml</Value><Value>M-CVTL-CLI</Value><Value>crates/cvtl-cli/tests/m8_analysis.rs</Value><Value>crates/cvtl-cli/tests/m6_replay.rs</Value></MustExist>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+    </BaselineAssertions>
+    <TargetAssertions>
+      <MustExist><Value>crates/cvtl-cli/src/export.rs</Value><Value>crates/cvtl-cli/src/export/table.rs</Value><Value>docs/M9_RUN_ARTIFACTS.md</Value></MustExist>
+      <MustVerify><Module>M-CVTL-CLI</Module></MustVerify>
+      <MustContain><File>crates/cvtl-cli/src/main.rs</File><Text>cvtl-cli export</Text></MustContain>
+      <MustContain><File>config/simulator.yaml</File><Text>hardware_enabled: false</Text></MustContain>
+      <MustPassCommand>
+        <Command budgetSeconds="3">cargo fmt --all -- --check</Command>
+        <Command budgetSeconds="44">cargo test --workspace --locked</Command>
+      </MustPassCommand>
+    </TargetAssertions>
+    <DurableScope>
+      <GraphAnchors><M-CVTL-CLI /></GraphAnchors>
+      <VerificationAnchors><V-M-CVTL-CLI /></VerificationAnchors>
+    </DurableScope>
+    <ObservedWriteScope>
+      <File>Cargo.lock</File>
+      <File>crates/cvtl-cli/Cargo.toml</File>
+      <File>crates/cvtl-cli/src/lib.rs</File>
+      <File>crates/cvtl-cli/src/main.rs</File>
+      <File>crates/cvtl-cli/src/replay.rs</File>
+      <File>crates/cvtl-cli/src/replay/profile.rs</File>
+      <File>crates/cvtl-cli/src/analysis.rs</File>
+      <File>crates/cvtl-cli/src/export.rs</File>
+      <File>crates/cvtl-cli/src/export/table.rs</File>
+      <File>crates/cvtl-cli/tests/m6_replay.rs</File>
+      <File>crates/cvtl-cli/tests/m8_analysis.rs</File>
+      <File>.grace/graph/main.xml</File>
+      <File>.grace/verification/main.xml</File>
+      <File>docs/M9_RUN_ARTIFACTS.md</File>
+      <File>docs/STATUS.md</File>
+    </ObservedWriteScope>
+    <ImplementationPlan>
+      <T-001>
+        <Title>Полный проверенный ряд и единый расчёт M8</Title>
+        <DependsOn></DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Сначала добавить красные CLI-тесты на существующих фикстурах M6 и M8. Команда export принимает один каталог и общие с analyze параметры --start, --window, --seed. Парный анализ остаётся у analyze. При успешной публикации, в том числе префикса, exit 0 и JSON с путями report.html, производного набора, числом строк и состоянием публикации complete или partial. При ошибке происхождения, чтения или записи exit 1 и диагностика. Состояние partial и отсутствие оценки видны в самом отчёте. Сквозные CLI-регрессии проверяются после сборки тракта T-002.</Criterion>
+          <Criterion>Одна проекция Export в существующем compare включает расчёт тепловых интервалов и получает TimelineSample только после успешного Replay::apply в flush. Синхронный callback передаёт полные такты таблице. Ошибка callback прекращает выдачу строк, хранится отдельно от диагностики replay и блокирует публикацию. Обычные JSON, окно GUI 240 и ограничение интервалов M8 сохраняются. Экспорт читает фиксированную длину открытого raw потоком без ограничения окна GUI. SHA-256 получает те же сжатые байты, включая остаток после остановки recover через ограниченный read. Проверить прочитанную длину и размер файла. Активная внешняя замена архива во время экспорта вне контракта. Raw чужого прогона или поколения отклоняется. При нуле проверенных записей идентичность обозначается unverified.</Criterion>
+          <Criterion>Использовать проверенные meta, SHA снимка и справочников из профиля, SHA прочитанных meta и raw и SHA прочитанной квитанции при наличии. В summary.json указать версию схемы экспорта, профиль, идентификатор и поколение прогона, режим симуляции, проверенные входные хэши, полную диагностику replay, last_verified_seq, количество строк, состояние квитанции и параметры M8. Из типизированной модели доступны начальные stage1, stage2, tf, jacket, холодные теплоёмкости и связи, other_w, идентификатор проводника и группа. Пропуски отражаются явно. Совпадение квитанции требует совпавший полный replay, подтверждённый OFF на обеих сторонах и одинаковый номер конца. Условие завершения и готовность M8 используют общий тракт с analyze и inspect_archive. Сохранить JSON и диагностический порядок прежних команд. M6 без модели и архив без пригодной квитанции дают «не определяется».</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-cli --test m6_replay</Command><Command>cargo test --locked -p cvtl-cli --test m8_analysis</Command></Verification>
+      </T-001>
+      <T-002>
+        <Title>CSV, Parquet и согласованная публикация</Title>
+        <DependsOn>T-001</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Одна закреплённая зависимость parquet =60.1.0 в cvtl-cli, default-features=false. Изолированная проба Apache SerializedFileWriter без Arrow, со сверкой SerializedFileReader, прошла офлайн на macOS и Ubuntu ARM64 под Rust 1.94.1. Повторные файлы совпали побайтно, проверены пустой Parquet, uint64 выше 2^53, пропуски и UTF-8. Разрешение на фактических manifests и lock добавляет 49 позиций lock, без смены прежних версий; в сборке добавляется 19 пакетов macOS и 18 Ubuntu. Сверить точный lock с пробой, оставить ранее закреплённые версии. Публичный кэш подготовлен отдельно.</Criterion>
+          <Criterion>Одна общая схема таблицы и один ряд для CSV UTF-8 с LF и Parquet. Порядок колонок: tick, seq, measured_ns как обязательные uint64; stage1_k, stage2_k, tf_k, jacket_k, body_k, inversion_delta_k, measured_a_w, measured_b_w, measured_total_w, requested_w, limited_w, target_a_w, target_b_w, bridge_flow_w, tracking_error_w, changed_mass_kg, changed_scale, changed_bridge_w_per_k, dh_event_j, temperature_before_change_k, temperature_after_change_k как nullable DOUBLE; slew_limited, power_limited, current_limited как nullable BOOLEAN и equivalence как nullable UTF-8. seq относится к Inputs. Единицы СИ в именах; tracking_error_w равен измеренному минус запрос. Сумма мощностей присутствует при двух пригодных конечных ветвях и конечной сумме. Без принятого Control флаги отсутствуют. Пропуск представлен пустым полем CSV и null Parquet. Целые записываются без f64-конверсии. Parquet без сжатия группами не больше 256 строк. Для нуля строк CSV имеет заголовок и Parquet имеет схему с нулём групп.</Criterion>
+          <Criterion>Создавать свежий временный каталог внутри обычного derived и свежий временный файл в корне прогона. Записать ticks.csv, ticks.parquet и summary.json, закончить и синхронизировать файлы до публикации. SHA-256 байтов summary.json с хэшами двух таблиц задаёт имя derived/&lt;sha256&gt;. Переиспользовать уже существующий набор только после сверки состава, типа файлов и содержимого. Установить готовый каталог через rename, затем заменить report.html одним rename в корне. Это последняя операция публикации. Отчёт на русском, без внешних ресурсов и JavaScript, указывает на тот же набор и показывает отдельно состояние raw, семантический префикс, выход, квитанцию, условия и Q2_eff либо причину отсутствия. Все вставляемые строки экранируются, href формируется из hex имени и фиксированных имён. Исключить временные пути и время экспорта из производных. Сохранить ранее опубликованные наборы и чистить только собственные временные файлы. Отказ до замены отчёта сохраняет прежний отчёт и его файлы. Два параллельных экспорта публикуют целостные наборы с последней заменой report.html, без отдельного сервиса или блокировки.</Criterion>
+          <Criterion>Тестами сверить CSV и чтение Parquet, порядок, числа и null, битовое сохранение uint64 и пограничные значения. На M8 fixture проверить совпадение результата analyze, repeat, сохранность состава и SHA всех первичных файлов, missing/mismatched receipt, конфликт готового каталога и ошибку хэша снимка при наличии старого отчёта. Отклонить derived и report.html, если они символические ссылки или несовместимые типы. Показать сохранность raw при существующей жёсткой ссылке report.html на raw. Два параллельных экспорта с разными параметрами сохраняют два целых набора и один report.html, указывающий на один из них. На M6 fixture проверить незакрытый прогон, оборванный и повреждённый кадры после целого такта, а также подмену Control в целостном кадре. Таблицы оканчиваются на последнем проверенном такте. Сравнить полный SHA raw включая хвост и доказать, что нулевая запись не подтверждает идентичность. Проверить отказ чужого raw до публикации.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo test --locked -p cvtl-cli --lib</Command><Command>cargo test --locked -p cvtl-cli --test m6_replay</Command><Command>cargo test --locked -p cvtl-cli --test m8_analysis</Command></Verification>
+      </T-002>
+      <T-003>
+        <Title>Файловые свидетельства и приёмка на двух ОС</Title>
+        <DependsOn>T-002</DependsOn>
+        <AcceptanceCriteria>
+          <Criterion>Взять одну и ту же копию калибровки M8 run-01 из .local/GRACE-M8-ANALYSIS/calibration-final, проверить состав и SHA исходников. Прогнать release export с --start 8 --window 12 --seed 20261111 на macOS и локальной Ubuntu 22.04.5 ARM64. Сверить 300 тактов с replay и Parquet readback, Q2_eff и полный анализ с analyze, хэши CSV/Parquet/summary/HTML в повторных запусках, неизменность первичного набора. Открыть report.html в локальном Chromium и проверить видимые статусы и относительные ссылки. Независимая проверка Parquet читает опубликованные файлы. Обновить только M-CVTL-CLI и V-M-CVTL-CLI и согласованные документы.</Criterion>
+          <Criterion>На обеих ОС выполнить fmt, сборку, Clippy с -D warnings, полный Rust-набор и запуск с config/simulator.yaml. Бюджеты ceil(4 × максимум) + 1 с получены из трёх прогонов чистой базы с максимумами 0,34 с и 10,56 с. Запустить baseline до исполнения, свежие target и final после. Независимая Astra отдельно проверяет точное дерево, простоту, результаты и даёт APPLY. Фаза A остаётся в офлайн и loopback.</Criterion>
+        </AcceptanceCriteria>
+        <Verification><Command>cargo fmt --all -- --check</Command><Command>cargo build --workspace --locked</Command><Command>cargo clippy --workspace --all-targets --locked -- -D warnings</Command><Command>cargo test --workspace --locked</Command><Command>cargo run --locked -p cvtl-daemon -- config/simulator.yaml</Command></Verification>
+      </T-003>
+    </ImplementationPlan>
+  </C-CVTL-M9-RUN-ARTIFACTS>
+</GraceChangePlan>
